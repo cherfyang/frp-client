@@ -1,0 +1,5 @@
+# 项目排除路径
+/scripts/frpc-control.d.ts
+/scripts/frpc-control.js
+/vite.config.d.ts
+/vite.config.js
