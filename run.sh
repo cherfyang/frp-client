@@ -22,5 +22,6 @@ if [ ! -d node_modules ]; then
   pnpm install
 fi
 
-echo "启动 frpc.toml 配置页: http://0.0.0.0:6633"
-exec pnpm run dev:6633
+echo "启动 frpc.toml 配置页：http://0.0.0.0:6633"
+pnpm run build
+exec env PORT=6633 HOST=0.0.0.0 pnpm run serve

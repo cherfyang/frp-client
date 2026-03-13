@@ -2,30 +2,28 @@ import { constants as fsConstants } from 'node:fs';
 import { access, open, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { getCurrentConfigPath } from './config-store.mjs';
 
 export const FRPC_BINARY_MISSING_CODE = 'frpc_binary_missing';
 const FRPC_INSTALL_FAILED_CODE = 'frpc_install_failed';
 const FRPC_MISSING_MESSAGE = '未找到 frpc 可执行文件。请先安装 frpc，或设置环境变量 FRPC_BIN 指向可执行文件。';
 
 export class FrpcControlError extends Error {
-  code: string;
-
-  constructor(code: string, message: string) {
+  constructor(code, message) {
     super(message);
     this.name = 'FrpcControlError';
     this.code = code;
   }
 }
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const getLocalFrpcBinaryPath = (rootDir: string) =>
+const getLocalFrpcBinaryPath = (rootDir) =>
   path.join(rootDir, '.tools', 'frp', 'bin', process.platform === 'win32' ? 'frpc.exe' : 'frpc');
 
-const getInstallerScriptPath = (rootDir: string) => path.join(rootDir, 'setup-frpc.sh');
-const getProjectConfigPath = (rootDir: string) => path.join(rootDir, 'frpc.toml');
+const getInstallerScriptPath = (rootDir) => path.join(rootDir, 'setup-frpc.sh');
 
-const probeBinary = (binary: string) => {
+const probeBinary = (binary) => {
   const result = spawnSync(binary, ['-v'], {
     stdio: 'ignore',
   });
@@ -33,7 +31,7 @@ const probeBinary = (binary: string) => {
   return !result.error;
 };
 
-const isProcessAlive = (pid: number) => {
+const isProcessAlive = (pid) => {
   try {
     process.kill(pid, 0);
     return true;
@@ -42,7 +40,7 @@ const isProcessAlive = (pid: number) => {
   }
 };
 
-const readPidFile = async (pidFilePath: string) => {
+const readPidFile = async (pidFilePath) => {
   try {
     const content = await readFile(pidFilePath, 'utf8');
     const pid = Number(content.trim());
@@ -52,7 +50,7 @@ const readPidFile = async (pidFilePath: string) => {
   }
 };
 
-const stopManagedFrpc = async (pidFilePath: string) => {
+const stopManagedFrpc = async (pidFilePath) => {
   const pid = await readPidFile(pidFilePath);
   if (!pid) {
     await rm(pidFilePath, { force: true });
@@ -80,7 +78,7 @@ const stopManagedFrpc = async (pidFilePath: string) => {
   return pid;
 };
 
-const readRecentLogSnippet = async (logFilePath: string) => {
+const readRecentLogSnippet = async (logFilePath) => {
   try {
     const content = await readFile(logFilePath, 'utf8');
     return content
@@ -94,7 +92,7 @@ const readRecentLogSnippet = async (logFilePath: string) => {
   }
 };
 
-const resolveFrpcBinary = async (rootDir: string) => {
+export const resolveFrpcBinary = async (rootDir) => {
   const fromEnv = process.env.FRPC_BIN?.trim();
   if (fromEnv) {
     if (!probeBinary(fromEnv)) {
@@ -121,15 +119,11 @@ const resolveFrpcBinary = async (rootDir: string) => {
   throw new FrpcControlError(FRPC_BINARY_MISSING_CODE, FRPC_MISSING_MESSAGE);
 };
 
-const waitForStableStart = async (
-  child: ReturnType<typeof spawn>,
-  pidFilePath: string,
-  logFilePath: string,
-) =>
-  new Promise<void>((resolve, reject) => {
+const waitForStableStart = async (child, pidFilePath, logFilePath) =>
+  new Promise((resolve, reject) => {
     let settled = false;
 
-    const finish = (handler: () => void) => {
+    const finish = (handler) => {
       if (settled) {
         return;
       }
@@ -141,13 +135,13 @@ const waitForStableStart = async (
       handler();
     };
 
-    const onError = (error: Error) => {
+    const onError = (error) => {
       finish(() => {
         reject(new Error(`frpc 启动失败：${error.message}`));
       });
     };
 
-    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    const onExit = (code, signal) => {
       void (async () => {
         await rm(pidFilePath, { force: true });
         const logSnippet = await readRecentLogSnippet(logFilePath);
@@ -174,8 +168,8 @@ const waitForStableStart = async (
     child.once('exit', onExit);
   });
 
-const runInstallerScript = async (rootDir: string) =>
-  new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+const runInstallerScript = async (rootDir) =>
+  new Promise((resolve, reject) => {
     const scriptPath = getInstallerScriptPath(rootDir);
     const child = spawn('bash', [scriptPath], {
       cwd: rootDir,
@@ -195,12 +189,7 @@ const runInstallerScript = async (rootDir: string) =>
     });
 
     child.on('error', (error) => {
-      reject(
-        new FrpcControlError(
-          FRPC_INSTALL_FAILED_CODE,
-          `执行安装脚本失败：${error.message}`,
-        ),
-      );
+      reject(new FrpcControlError(FRPC_INSTALL_FAILED_CODE, `执行安装脚本失败：${error.message}`));
     });
 
     child.on('close', (code) => {
@@ -214,43 +203,20 @@ const runInstallerScript = async (rootDir: string) =>
     });
   });
 
-export const installManagedFrpc = async (rootDir: string) => {
+export const installManagedFrpc = async (rootDir) => {
   const result = await runInstallerScript(rootDir);
   const binaryPath = await resolveFrpcBinary(rootDir);
 
   return {
+    success: true,
     ...result,
     binaryPath,
   };
 };
 
-export const readProjectFrpcConfig = async (rootDir: string) => {
-  const configPath = getProjectConfigPath(rootDir);
-  const content = await readFile(configPath, 'utf8');
-
-  return {
-    configPath,
-    fileName: '当前目录 / frpc.toml',
-    content: `${content.trimEnd()}\n`,
-  };
-};
-
-export const saveProjectFrpcConfig = async (rootDir: string, content: string) => {
-  const configPath = getProjectConfigPath(rootDir);
-  const normalized = `${content.trimEnd()}\n`;
-
-  await writeFile(configPath, normalized, 'utf8');
-
-  return {
-    configPath,
-    fileName: '当前目录 / frpc.toml',
-    content: normalized,
-  };
-};
-
-export const restartManagedFrpc = async (rootDir: string) => {
+export const restartManagedFrpc = async (rootDir) => {
   const frpcBinary = await resolveFrpcBinary(rootDir);
-  const configPath = process.env.FRPC_CONFIG || getProjectConfigPath(rootDir);
+  const configPath = process.env.FRPC_CONFIG || getCurrentConfigPath(rootDir);
   const pidFilePath = path.join(rootDir, '.frpc.pid');
   const logFilePath = path.join(rootDir, '.frpc.log');
 
@@ -273,6 +239,7 @@ export const restartManagedFrpc = async (rootDir: string) => {
   await waitForStableStart(child, pidFilePath, logFilePath);
 
   return {
+    success: true,
     pid: child.pid,
     stoppedPid,
     configPath,

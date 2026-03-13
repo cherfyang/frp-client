@@ -40,3 +40,10 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = 6633
 remotePort = 0
+
+[[proxies]]
+name = "toll_box"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8088
+remotePort = 0

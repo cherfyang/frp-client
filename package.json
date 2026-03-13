@@ -8,7 +8,9 @@
     "dev:6633": "vite --host 0.0.0.0 --port 6633 --strictPort",
     "setup:frpc": "bash ./setup-frpc.sh",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "serve": "node ./server/index.mjs",
+    "start:6633": "pnpm run build && pnpm run serve"
   },
   "dependencies": {
     "marked": "^17.0.4",
