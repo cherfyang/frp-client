@@ -8,10 +8,10 @@ const DEFAULT_SLOT_CONTENT = (slot) => `# frpc config slot ${slot}\n`;
 
 const normalizeContent = (content) => `${String(content ?? '').trimEnd()}\n`;
 
-const getConfigDirectory = (rootDir) => path.join(rootDir, 'frpc-config');
+const getConfigDirectory = (rootDir) => path.join(rootDir, 'config', 'profiles');
 const getManifestPath = (rootDir) => path.join(getConfigDirectory(rootDir), 'manifest.json');
 
-export const getCurrentConfigPath = (rootDir) => path.join(rootDir, 'frpc.toml');
+export const getCurrentConfigPath = (rootDir) => path.join(rootDir, 'config', 'frpc.toml');
 export const getSlotFileName = (slot) => `frpc-${slot}.toml`;
 export const getSlotFilePath = (rootDir, slot) => path.join(getConfigDirectory(rootDir), getSlotFileName(slot));
 

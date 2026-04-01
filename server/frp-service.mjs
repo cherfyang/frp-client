@@ -21,7 +21,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const getLocalFrpcBinaryPath = (rootDir) =>
   path.join(rootDir, '.tools', 'frp', 'bin', process.platform === 'win32' ? 'frpc.exe' : 'frpc');
 
-const getInstallerScriptPath = (rootDir) => path.join(rootDir, 'setup-frpc.sh');
+const getInstallerScriptPath = (rootDir) => path.join(rootDir, 'scripts', 'setup-frpc.sh');
 
 const probeBinary = (binary) => {
   const result = spawnSync(binary, ['-v'], {

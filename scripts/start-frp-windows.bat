@@ -8,7 +8,7 @@ if not "%OS%"=="Windows_NT" (
 )
 
 set ROOT_DIR=%~dp0..
-set CONFIG_PATH=%ROOT_DIR%\frpc.toml
+set CONFIG_PATH=%ROOT_DIR%\config\frpc.toml
 if not "%~1"=="" set CONFIG_PATH=%~1
 set LOCAL_BIN=%ROOT_DIR%\.tools\frp\bin\frpc.exe
 set VERSION_FILE=%ROOT_DIR%\.tools\frp\VERSION

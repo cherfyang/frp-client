@@ -3,14 +3,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_PATH="${1:-$ROOT_DIR/frpc.toml}"
+CONFIG_PATH="${1:-$ROOT_DIR/config/frpc.toml}"
 LOCAL_BIN="$ROOT_DIR/.tools/frp/bin/frpc"
 VERSION_FILE="$ROOT_DIR/.tools/frp/VERSION"
 
 # 检查当前系统
 CURRENT_OS="$(uname -s)"
-if [ "$CURRENT_OS" != "Linux" ]; then
-  echo "错误：当前系统是 $CURRENT_OS，请使用 macOS 系统对应的启动脚本 (start-frp-mac.sh)。" >&2
+if [ "$CURRENT_OS" != "Darwin" ]; then
+  echo "错误：当前系统是 $CURRENT_OS，请使用 Linux 系统对应的启动脚本 (start-frp-linux.sh)。" >&2
   exit 1
 fi
 

@@ -1,5 +1,21 @@
-# 项目排除路径
-/scripts/frpc-control.d.ts
-/scripts/frpc-control.js
-/vite.config.d.ts
-/vite.config.js
+# 构建产物
+/dist/
+*.tsbuildinfo
+*.js
+*.d.ts
+
+# 依赖
+/node_modules/
+/.tools/
+
+# 运行时文件
+/.frpc.pid
+/.frpc.log
+
+# IDE
+/.idea/
+.DS_Store
+
+# 系统文件
+.DS_Store
+Thumbs.db
