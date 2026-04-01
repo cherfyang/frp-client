@@ -2,11 +2,9 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TOOLS_DIR="$ROOT_DIR/.tools/frp"
-BIN_DIR="$TOOLS_DIR/bin"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TOOLS_DIR="$ROOT_DIR/.tools"
 VERSION_FILE="$TOOLS_DIR/VERSION"
-INSTALL_BIN="$BIN_DIR/frpc"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -22,114 +20,102 @@ require_command() {
   fi
 }
 
-resolve_platform() {
-  case "$(uname -s)" in
-    Darwin)
-      printf '%s\n' "darwin"
-      ;;
-    Linux)
-      printf '%s\n' "linux"
-      ;;
-    *)
-      echo "暂不支持当前系统: $(uname -s)" >&2
-      exit 1
-      ;;
-  esac
-}
-
-resolve_arch() {
-  case "$(uname -m)" in
-    x86_64|amd64)
-      printf '%s\n' "amd64"
-      ;;
-    arm64|aarch64)
-      printf '%s\n' "arm64"
-      ;;
-    *)
-      echo "暂不支持当前架构: $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-}
-
 require_command curl
 require_command tar
-require_command node
 
-PLATFORM="$(resolve_platform)"
-ARCH="$(resolve_arch)"
+DEFAULT_VERSION="v0.68.0"
 
 if [ -n "${FRPC_VERSION:-}" ]; then
   case "$FRPC_VERSION" in
-    v*)
-      RELEASE_TAG="$FRPC_VERSION"
-      ;;
-    *)
-      RELEASE_TAG="v$FRPC_VERSION"
-      ;;
+    v*) RELEASE_TAG="$FRPC_VERSION" ;;
+    *)  RELEASE_TAG="v$FRPC_VERSION" ;;
   esac
-  RELEASE_API_URL="https://api.github.com/repos/fatedier/frp/releases/tags/$RELEASE_TAG"
 else
-  RELEASE_API_URL="https://api.github.com/repos/fatedier/frp/releases/latest"
+  RELEASE_TAG="$DEFAULT_VERSION"
 fi
 
-echo "正在查询 frp 官方发布信息..."
-RELEASE_JSON="$(curl -fsSL "$RELEASE_API_URL")"
-
-RELEASE_META="$(
-  printf '%s' "$RELEASE_JSON" \
-    | node -e '
-      let input = "";
-      process.stdin.on("data", (chunk) => {
-        input += chunk;
-      });
-      process.stdin.on("end", () => {
-        const release = JSON.parse(input);
-        const platform = process.argv[1];
-        const arch = process.argv[2];
-        const asset = release.assets.find((item) =>
-          new RegExp(`frp_[^/]+_${platform}_${arch}\\.tar\\.gz$`).test(item.browser_download_url),
-        );
-
-        if (!asset) {
-          console.error(`未找到匹配 ${platform}/${arch} 的 frpc 安装包。`);
-          process.exit(2);
-        }
-
-        process.stdout.write(`${release.tag_name}\n${asset.browser_download_url}\n`);
-      });
-    ' "$PLATFORM" "$ARCH"
-)"
-
-RELEASE_TAG="$(printf '%s\n' "$RELEASE_META" | sed -n '1p')"
-DOWNLOAD_URL="$(printf '%s\n' "$RELEASE_META" | sed -n '2p')"
-
-mkdir -p "$BIN_DIR"
-
-if [ -x "$INSTALL_BIN" ] && [ -f "$VERSION_FILE" ] && [ "$(cat "$VERSION_FILE")" = "$RELEASE_TAG" ]; then
+if [ -f "$VERSION_FILE" ] && [ "$(cat "$VERSION_FILE")" = "$RELEASE_TAG" ]; then
   echo "frpc 已安装，版本: $RELEASE_TAG"
-  echo "可执行文件: $INSTALL_BIN"
+  echo "路径: $TOOLS_DIR/{darwin,linux,windows}/"
   exit 0
 fi
 
-ARCHIVE_PATH="$TMP_DIR/frp.tar.gz"
+VERSION_NUM="${RELEASE_TAG#v}"
 
-echo "正在下载 $RELEASE_TAG ($PLATFORM/$ARCH)..."
-curl -fL "$DOWNLOAD_URL" -o "$ARCHIVE_PATH"
+download_unix() {
+  local platform="$1"
+  local arch="$2"
+  local bin_dir="$TOOLS_DIR/$platform"
+  local bin_name="frpc"
+  local asset_url="https://github.com/fatedier/frp/releases/download/${RELEASE_TAG}/frp_${VERSION_NUM}_${platform}_${arch}.tar.gz"
+  local archive_path="$TMP_DIR/frp.tar.gz"
 
-echo "正在解压 frpc..."
-tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR"
+  mkdir -p "$bin_dir"
 
-FOUND_BIN="$(find "$TMP_DIR" -type f -name 'frpc' | head -n 1)"
-if [ -z "$FOUND_BIN" ]; then
-  echo "压缩包中未找到 frpc 可执行文件。" >&2
-  exit 1
-fi
+  echo "  下载 ${platform}/${arch}..."
+  if ! curl -fSL "$asset_url" -o "$archive_path"; then
+    echo "  跳过 ${platform}/${arch}（下载失败）"
+    return 0
+  fi
 
-cp "$FOUND_BIN" "$INSTALL_BIN"
-chmod +x "$INSTALL_BIN"
+  echo "  解压 ${platform}/${arch}..."
+  tar -xzf "$archive_path" -C "$TMP_DIR"
+
+  local found
+  found="$(find "$TMP_DIR" -type f -name 'frpc' | head -n 1)"
+  if [ -z "$found" ]; then
+    echo "  警告：压缩包中未找到 frpc。" >&2
+    return 0
+  fi
+
+  cp "$found" "$bin_dir/$bin_name"
+  chmod +x "$bin_dir/$bin_name"
+  rm -rf "$TMP_DIR"/frp_*
+  echo "  完成 -> $bin_dir/$bin_name"
+}
+
+download_windows() {
+  local arch="$1"
+  local bin_dir="$TOOLS_DIR/windows"
+  local bin_name="frpc.exe"
+  local asset_url="https://github.com/fatedier/frp/releases/download/${RELEASE_TAG}/frp_${VERSION_NUM}_windows_${arch}.zip"
+  local archive_path="$TMP_DIR/frp.zip"
+
+  mkdir -p "$bin_dir"
+
+  echo "  下载 windows/${arch}..."
+  if ! curl -fSL "$asset_url" -o "$archive_path"; then
+    echo "  跳过 windows/${arch}（下载失败）"
+    return 0
+  fi
+
+  echo "  解压 windows/${arch}..."
+  unzip -qo "$archive_path" -d "$TMP_DIR"
+
+  local found
+  found="$(find "$TMP_DIR" -type f -name 'frpc.exe' | head -n 1)"
+  if [ -z "$found" ]; then
+    echo "  警告：压缩包中未找到 frpc.exe。" >&2
+    return 0
+  fi
+
+  cp "$found" "$bin_dir/$bin_name"
+  rm -rf "$TMP_DIR"/frp_*
+  echo "  完成 -> $bin_dir/$bin_name"
+}
+
+echo "开始下载全平台 frpc ($RELEASE_TAG)..."
+
+for arch in amd64 arm64; do
+  download_unix "darwin" "$arch"
+  download_unix "linux" "$arch"
+done
+
+download_windows "amd64"
+
 printf '%s\n' "$RELEASE_TAG" > "$VERSION_FILE"
 
-echo "frpc 安装完成"
+echo ""
+echo "frpc 全平台安装完成"
 echo "版本: $RELEASE_TAG"
-echo "路径: $INSTALL_BIN"
+echo "路径: $TOOLS_DIR/{darwin,linux,windows}/"

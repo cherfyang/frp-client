@@ -6,7 +6,6 @@
 
 # 依赖
 /node_modules/
-/.tools/
 
 # 运行时文件
 /.frpc.pid

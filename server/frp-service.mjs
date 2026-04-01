@@ -18,8 +18,13 @@ export class FrpcControlError extends Error {
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const getLocalFrpcBinaryPath = (rootDir) =>
-  path.join(rootDir, '.tools', 'frp', 'bin', process.platform === 'win32' ? 'frpc.exe' : 'frpc');
+const getLocalFrpcBinaryPath = (rootDir) => {
+  const platform = process.platform === 'win32' ? 'windows'
+    : process.platform === 'darwin' ? 'darwin'
+    : 'linux';
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  return path.join(rootDir, '.tools', platform, `frpc${ext}`);
+};
 
 const getInstallerScriptPath = (rootDir) => path.join(rootDir, 'scripts', 'setup-frpc.sh');
 
@@ -171,11 +176,18 @@ const waitForStableStart = async (child, pidFilePath, logFilePath) =>
 const runInstallerScript = async (rootDir) =>
   new Promise((resolve, reject) => {
     const scriptPath = getInstallerScriptPath(rootDir);
-    const child = spawn('bash', [scriptPath], {
-      cwd: rootDir,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const isWindows = process.platform === 'win32';
+    const child = isWindows
+      ? spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath.replace('.sh', '.ps1')], {
+          cwd: rootDir,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      : spawn('bash', [scriptPath], {
+          cwd: rootDir,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
 
     let stdout = '';
     let stderr = '';
