@@ -8,16 +8,8 @@ import (
 	"strings"
 )
 
-func GetConfigPath(rootDir string) string {
-	return filepath.Join(rootDir, "config", "frpc.toml")
-}
-
-func ReadConfig(rootDir string) (string, error) {
-	configPath := GetConfigPath(rootDir)
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			defaultConfig := `serverAddr = "127.0.0.1"
+func DefaultConfig() string {
+	return `serverAddr = "127.0.0.1"
 serverPort = 7000
 
 [[proxies]]
@@ -27,22 +19,17 @@ localIP = "127.0.0.1"
 localPort = 8080
 remotePort = 8080
 `
-			dir := filepath.Dir(configPath)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return "", fmt.Errorf("创建配置目录失败: %w", err)
-			}
-			if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
-				return "", fmt.Errorf("创建默认配置失败: %w", err)
-			}
-			return defaultConfig, nil
-		}
+}
+
+func ReadConfig(configPath string) (string, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
 		return "", fmt.Errorf("读取配置失败: %w", err)
 	}
 	return string(data), nil
 }
 
-func WriteConfig(rootDir, content string) error {
-	configPath := GetConfigPath(rootDir)
+func WriteConfig(configPath, content string) error {
 	dir := filepath.Dir(configPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("创建配置目录失败: %w", err)
@@ -53,18 +40,15 @@ func WriteConfig(rootDir, content string) error {
 	return nil
 }
 
-func ValidateConfig(rootDir, toolsDir string) (string, error) {
-	configPath := GetConfigPath(rootDir)
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("配置文件 frpc.toml 不存在")
+func ValidateConfig(configPath, toolPath string) (string, error) {
+	if _, err := os.Stat(configPath); err != nil {
+		return "", fmt.Errorf("配置文件不存在: %s", configPath)
+	}
+	if _, err := os.Stat(toolPath); err != nil {
+		return "", fmt.Errorf("未找到 frpc 可执行文件: %s", toolPath)
 	}
 
-	frpcPath := FindFrpcBinary(toolsDir)
-	if frpcPath == "" {
-		return "", fmt.Errorf("未找到 frpc 可执行文件，请先安装 frp 客户端")
-	}
-
-	cmd := exec.Command(frpcPath, "verify", "-c", configPath)
+	cmd := exec.Command(toolPath, "verify", "-c", configPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(output))

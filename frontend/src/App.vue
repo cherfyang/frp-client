@@ -23,14 +23,19 @@ import {
 // Wails runtime
 import {
   GetSystemInfo,
-  GetMirrors,
   GetFrpVersions,
   CheckFrpcInstalled,
   GetFrpcVersion,
-  GetRootDir,
   GetSettings,
   SaveSettings,
-  ChooseDirectory,
+  ResetSettings,
+  ChooseFile,
+  CheckSettingsFiles,
+  GetDownloadTarget,
+  GetFrpHelp,
+  ListFrpcProcesses,
+  KillFrpcProcesses,
+  CancelFrpcDownload,
   DownloadFrpc,
   GetDownloadProgress,
   ReadConfig,
@@ -43,7 +48,7 @@ import {
   GetFrpLogs,
 } from '../wailsjs/go/main/App';
 
-type ViewId = 'editor' | 'browse' | 'add';
+type ViewId = 'editor' | 'browse' | 'add' | 'help';
 type FrpStatusView = {
   running: boolean;
   pid: number;
@@ -54,10 +59,31 @@ type FrpStatusView = {
   binaryPath?: string;
 };
 type AppSettingsView = {
-  rootDir: string;
-  toolsDir: string;
+  toolPath: string;
+  configPath: string;
+  downloadUrl: string;
   theme: 'dark' | 'light';
   autoStart: boolean;
+};
+type DownloadTargetView = {
+  url: string;
+  filename: string;
+  version: string;
+};
+type SettingsFileStatusView = {
+  toolExists: boolean;
+  configExists: boolean;
+  toolPath: string;
+  configPath: string;
+  toolHelp: string;
+  configHelp: string;
+  downloadHelp: string;
+  manualKillHelp: string;
+};
+type FrpcProcessInfoView = {
+  pids: number[];
+  killCommand: string;
+  message: string;
 };
 type LogLineLevel = 'info' | 'warn' | 'error' | 'debug' | 'default';
 
@@ -65,6 +91,7 @@ const moduleTabs: Array<{ id: ViewId; label: string }> = [
   { id: 'editor', label: '配置文件' },
   { id: 'browse', label: '查看段落' },
   { id: 'add', label: '添加段落' },
+  { id: 'help', label: '说明' },
 ];
 
 const sourceText = ref('');
@@ -74,16 +101,18 @@ const actionError = ref('');
 const actionSuccess = ref('');
 const activeView = ref<ViewId>('editor');
 const sourceEditor = ref<HTMLTextAreaElement | null>(null);
-const rootDir = ref('');
-const toolsDir = ref('');
+const toolPath = ref('');
+const configPath = ref('');
 const theme = ref<'dark' | 'light'>('dark');
 const showSettings = ref(false);
 const settingsDraft = reactive<AppSettingsView>({
-  rootDir: '',
-  toolsDir: '',
+  toolPath: '',
+  configPath: '',
+  downloadUrl: '',
   theme: 'dark',
   autoStart: false,
 });
+const settingsFileStatus = ref<SettingsFileStatusView | null>(null);
 const settingsError = ref('');
 
 const isRestarting = ref(false);
@@ -94,12 +123,13 @@ const frpLogs = ref('');
 const frpcInstalled = ref(false);
 const frpcVersion = ref('');
 
-const mirrors = ref<Array<{ name: string; type: string; template: string }>>([]);
 const versions = ref<string[]>([]);
-const selectedMirror = ref('GitHub 官方');
 const selectedVersion = ref('v0.68.0');
+const downloadTarget = ref<DownloadTargetView>({ url: '', filename: '', version: '' });
+const helpMarkdown = ref('');
 const downloadProgress = ref(0);
 const isDownloading = ref(false);
+const isCancelingDownload = ref(false);
 
 const showDownloadPanel = ref(false);
 const showLogs = ref(false);
@@ -129,9 +159,7 @@ const presetOptions = computed(() =>
   })),
 );
 
-const sortedMirrors = computed(() =>
-  mirrors.value.filter((m) => m.type !== 'custom'),
-);
+const renderedHelpBlocks = computed(() => renderMarkdown(helpMarkdown.value));
 const renderedLogLines = computed(() => {
   const text = frpLogs.value.trim();
   if (!text) return [];
@@ -150,6 +178,80 @@ const detectLogLevel = (line: string): LogLineLevel => {
   if (/\b(debug|trace)\b/.test(normalized) || /\[d\]|\[t\]/.test(normalized)) return 'debug';
   return 'default';
 };
+
+type HelpBlock =
+  | { type: 'heading'; level: number; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'list'; items: string[] }
+  | { type: 'code'; lang: string; text: string };
+
+const renderMarkdown = (markdown: string): HelpBlock[] => {
+  const blocks: HelpBlock[] = [];
+  const lines = markdown.split('\n');
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+  let codeLang = '';
+  let codeLines: string[] | null = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push({ type: 'paragraph', text: paragraph.join(' ') });
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!listItems.length) return;
+    blocks.push({ type: 'list', items: [...listItems] });
+    listItems = [];
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^```(\w+)?/);
+    if (fence) {
+      if (codeLines) {
+        blocks.push({ type: 'code', lang: codeLang, text: codeLines.join('\n') });
+        codeLines = null;
+        codeLang = '';
+      } else {
+        flushParagraph();
+        flushList();
+        codeLines = [];
+        codeLang = fence[1] || '';
+      }
+      continue;
+    }
+    if (codeLines) {
+      codeLines.push(line);
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: 'heading', level: heading[1].length, text: stripInlineMarkdown(heading[2]) });
+      continue;
+    }
+    const list = trimmed.match(/^-\s+(.+)$/);
+    if (list) {
+      flushParagraph();
+      listItems.push(stripInlineMarkdown(list[1]));
+      continue;
+    }
+    flushList();
+    paragraph.push(stripInlineMarkdown(trimmed));
+  }
+  flushParagraph();
+  flushList();
+  return blocks;
+};
+
+const stripInlineMarkdown = (text: string) =>
+  text.replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1');
 
 const isRunning = computed(() => frpStatus.value.running);
 const proxyCount = computed(() => parsedDocument.value.sectionCounts.proxies || 0);
@@ -183,11 +285,12 @@ const duplicateWarnings = computed(() =>
 );
 
 const applySettingsToState = (settings: AppSettingsView) => {
-  rootDir.value = settings.rootDir;
-  toolsDir.value = settings.toolsDir;
+  toolPath.value = settings.toolPath;
+  configPath.value = settings.configPath;
+  settingsDraft.downloadUrl = settings.downloadUrl;
   theme.value = settings.theme === 'light' ? 'light' : 'dark';
-  settingsDraft.rootDir = settings.rootDir;
-  settingsDraft.toolsDir = settings.toolsDir;
+  settingsDraft.toolPath = settings.toolPath;
+  settingsDraft.configPath = settings.configPath;
   settingsDraft.theme = theme.value;
   settingsDraft.autoStart = Boolean(settings.autoStart);
 };
@@ -236,19 +339,13 @@ onMounted(async () => {
 
 const refreshAll = async () => {
   await loadSettings();
+  await refreshSettingsFileStatus();
   await loadConfig();
   await refreshFrpStatus();
   await checkInstall();
-  await loadMirrors();
   await loadVersions();
-};
-
-const loadRootDir = async () => {
-  try {
-    rootDir.value = await GetRootDir();
-  } catch {
-    rootDir.value = '';
-  }
+  await refreshDownloadTarget();
+  await loadHelp();
 };
 
 const loadSettings = async () => {
@@ -256,7 +353,16 @@ const loadSettings = async () => {
     const settings = await GetSettings() as AppSettingsView;
     applySettingsToState(settings);
   } catch {
-    await loadRootDir();
+    toolPath.value = '';
+    configPath.value = '';
+  }
+};
+
+const refreshSettingsFileStatus = async () => {
+  try {
+    settingsFileStatus.value = await CheckSettingsFiles() as SettingsFileStatusView;
+  } catch {
+    settingsFileStatus.value = null;
   }
 };
 
@@ -278,43 +384,58 @@ const loadConfig = async () => {
   }
 };
 
-const loadMirrors = async () => {
-  try {
-    mirrors.value = await GetMirrors();
-  } catch { /* ignore */ }
-};
-
 const loadVersions = async () => {
   try {
     versions.value = await GetFrpVersions();
-    if (versions.value.length && !versions.value.includes(selectedVersion.value)) {
+    if (versions.value.length) {
       selectedVersion.value = versions.value[0];
     }
+    await refreshDownloadTarget();
   } catch { /* ignore */ }
+};
+
+const refreshDownloadTarget = async () => {
+  try {
+    const info = await GetSystemInfo();
+    downloadTarget.value = await GetDownloadTarget(selectedVersion.value, info.os, info.arch) as DownloadTargetView;
+  } catch {
+    downloadTarget.value = { url: '', filename: '', version: selectedVersion.value };
+  }
+};
+
+const loadHelp = async () => {
+  try {
+    const info = await GetSystemInfo();
+    helpMarkdown.value = await GetFrpHelp(selectedVersion.value, info.os, info.arch);
+  } catch {
+    helpMarkdown.value = '';
+  }
 };
 
 const openSettings = () => {
   settingsError.value = '';
-  settingsDraft.rootDir = rootDir.value;
-  settingsDraft.toolsDir = toolsDir.value || `${rootDir.value}/.tools`;
+  settingsDraft.toolPath = toolPath.value;
+  settingsDraft.configPath = configPath.value;
+  settingsDraft.downloadUrl = settingsDraft.downloadUrl || 'https://github.com/fatedier/frp/releases/download/{tag}/{filename}';
   settingsDraft.theme = theme.value;
   settingsDraft.autoStart = Boolean(settingsDraft.autoStart);
+  refreshSettingsFileStatus();
   showSettings.value = true;
 };
 
-const pickRootDir = async () => {
+const pickToolPath = async () => {
   try {
-    const picked = await ChooseDirectory('选择 frp-client 工作目录');
-    if (picked) settingsDraft.rootDir = picked;
+    const picked = await ChooseFile('选择 frpc 可执行文件');
+    if (picked) settingsDraft.toolPath = picked;
   } catch (e: any) {
     settingsError.value = e.message || String(e);
   }
 };
 
-const pickToolsDir = async () => {
+const pickConfigPath = async () => {
   try {
-    const picked = await ChooseDirectory('选择 frpc 工具目录');
-    if (picked) settingsDraft.toolsDir = picked;
+    const picked = await ChooseFile('选择 frpc.toml 配置文件');
+    if (picked) settingsDraft.configPath = picked;
   } catch (e: any) {
     settingsError.value = e.message || String(e);
   }
@@ -325,17 +446,39 @@ const saveAppSettings = async () => {
   actionError.value = '';
   try {
     const next = await SaveSettings({
-      rootDir: settingsDraft.rootDir,
-      toolsDir: settingsDraft.toolsDir,
+      toolPath: settingsDraft.toolPath,
+      configPath: settingsDraft.configPath,
+      downloadUrl: settingsDraft.downloadUrl,
       theme: settingsDraft.theme,
       autoStart: settingsDraft.autoStart,
     }) as AppSettingsView;
     applySettingsToState(next);
     showSettings.value = false;
     actionSuccess.value = '设置已保存';
+    await refreshSettingsFileStatus();
     await loadConfig();
     await refreshFrpStatus();
     await checkInstall();
+    await refreshDownloadTarget();
+    await loadHelp();
+  } catch (e: any) {
+    settingsError.value = e.message || String(e);
+  }
+};
+
+const resetAppSettings = async () => {
+  settingsError.value = '';
+  if (!window.confirm('确认重置为默认设置？这会关闭 frpc 开机自启动设置，但不会删除已有文件。')) return;
+  try {
+    const next = await ResetSettings() as AppSettingsView;
+    applySettingsToState(next);
+    actionSuccess.value = '已重置为默认设置';
+    await refreshSettingsFileStatus();
+    await loadConfig();
+    await refreshFrpStatus();
+    await checkInstall();
+    await refreshDownloadTarget();
+    await loadHelp();
   } catch (e: any) {
     settingsError.value = e.message || String(e);
   }
@@ -361,6 +504,7 @@ const saveConfig = async () => {
   actionSuccess.value = '';
   try {
     await WriteConfig(sourceText.value);
+    await refreshSettingsFileStatus();
     actionSuccess.value = '配置已保存';
     setTimeout(() => { actionSuccess.value = ''; }, 2000);
   } catch (e: any) {
@@ -384,20 +528,33 @@ const validateConfig = async () => {
 const startDownload = async () => {
   if (isDownloading.value) return;
   isDownloading.value = true;
+  isCancelingDownload.value = false;
   downloadProgress.value = 0;
   actionError.value = '';
   actionSuccess.value = '';
 
   const info = await GetSystemInfo();
   try {
-    await DownloadFrpc(selectedVersion.value, selectedMirror.value, info.os, info.arch);
+    await DownloadFrpc(selectedVersion.value, '', info.os, info.arch);
     await checkInstall();
+    await refreshSettingsFileStatus();
     actionSuccess.value = 'frpc 下载安装完成';
     isDownloading.value = false;
+    isCancelingDownload.value = false;
   } catch (e: any) {
-    actionError.value = `下载失败: ${e.message || e}`;
+    const message = e.message || String(e);
+    actionError.value = message.includes('下载已停止') ? '下载已停止' : `下载失败: ${message}`;
     isDownloading.value = false;
+    isCancelingDownload.value = false;
   }
+};
+
+const stopDownload = async () => {
+  if (!isDownloading.value || isCancelingDownload.value) return;
+  isCancelingDownload.value = true;
+  try {
+    await CancelFrpcDownload();
+  } catch { /* ignore */ }
 };
 
 let progressTimer: ReturnType<typeof setInterval> | null = null;
@@ -417,6 +574,11 @@ watch(isDownloading, (val) => {
   }
 });
 
+watch(selectedVersion, () => {
+  refreshDownloadTarget();
+  loadHelp();
+});
+
 // ========== 进程管理 ==========
 
 const refreshFrpStatus = async () => {
@@ -429,6 +591,21 @@ const refreshLogs = async () => {
   try {
     frpLogs.value = await GetFrpLogs(50);
   } catch { /* ignore */ }
+};
+
+const confirmAndKillExistingFrpc = async () => {
+  const info = await ListFrpcProcesses() as FrpcProcessInfoView;
+  if (!info.pids?.length) return true;
+  const message = `${info.message}\n\n${info.killCommand ? `手动命令: ${info.killCommand}` : ''}`;
+  if (!window.confirm(message)) return false;
+  try {
+    await KillFrpcProcesses(info.pids);
+    return true;
+  } catch (e: any) {
+    const suffix = info.killCommand ? `\n请手动执行: ${info.killCommand}` : '';
+    actionError.value = `${e.message || String(e)}${suffix}`;
+    return false;
+  }
 };
 
 let statusTimer: ReturnType<typeof setInterval> | null = null;
@@ -447,6 +624,8 @@ const handleStart = async () => {
   showLogs.value = true;
   await refreshLogs();
   try {
+    const canStart = await confirmAndKillExistingFrpc();
+    if (!canStart) return;
     await StartFrp();
     actionSuccess.value = 'frpc 已启动';
     await refreshFrpStatus();
@@ -480,6 +659,11 @@ const handleRestart = async () => {
         await startDownload();
         await refreshFrpStatus();
       }
+      return;
+    }
+    const canRestart = await confirmAndKillExistingFrpc();
+    if (!canRestart) {
+      restartButtonText.value = '重启frp服务';
       return;
     }
     await RestartFrp();
@@ -677,6 +861,13 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
 
     <!-- 下载面板 -->
     <section v-if="showDownloadPanel" class="panel">
+      <div class="download-head">
+        <div>
+          <span class="label">当前下载链接</span>
+          <code>{{ downloadTarget.url || '读取中...' }}</code>
+        </div>
+        <span class="download-file">{{ downloadTarget.filename }}</span>
+      </div>
       <div class="panel-row">
         <div class="panel-cell">
           <label class="label">版本</label>
@@ -685,14 +876,15 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
           </select>
         </div>
         <div class="panel-cell">
-          <label class="label">镜像源</label>
-          <select v-model="selectedMirror" class="input">
-            <option v-for="m in sortedMirrors" :key="m.name" :value="m.name">{{ m.name }}</option>
-          </select>
+          <label class="label">下载命令</label>
+          <input class="input command-input" type="text" readonly :value="`curl -L -o ${downloadTarget.filename || 'frp.tar.gz'} ${downloadTarget.url || ''}`" />
         </div>
         <div class="panel-cell panel-btn">
           <button class="btn btn-blue" :disabled="isDownloading" @click="startDownload">
-            {{ isDownloading ? `下载中 ${downloadProgress.toFixed(0)}%` : frpcInstalled ? '更新 frpc' : '下载安装' }}
+            {{ frpcInstalled ? '更新 frpc' : '下载安装' }}
+          </button>
+          <button v-if="isDownloading" class="btn btn-red" :disabled="isCancelingDownload" @click="stopDownload">
+            {{ isCancelingDownload ? '停止中...' : '停止下载' }}
           </button>
         </div>
       </div>
@@ -746,12 +938,12 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
         <strong>{{ visitorCount }}</strong>
       </div>
       <div class="metric metric-wide">
-        <span class="metric-label">工作目录</span>
-        <strong>{{ rootDir || '读取中...' }}</strong>
+        <span class="metric-label">配置路径</span>
+        <strong>{{ configPath || '读取中...' }}</strong>
       </div>
       <div class="metric metric-wide">
-        <span class="metric-label">工具目录</span>
-        <strong>{{ toolsDir || '读取中...' }}</strong>
+        <span class="metric-label">工具路径</span>
+        <strong>{{ toolPath || '读取中...' }}</strong>
       </div>
     </section>
 
@@ -774,7 +966,7 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
           <button class="btn btn-ghost" @click="loadConfig">重新读取</button>
           <button class="btn btn-ghost" @click="validateConfig" :disabled="!frpcInstalled">验证配置</button>
         </div>
-        <span class="editor-path">config/frpc.toml</span>
+        <span class="editor-path">{{ configPath || 'frpc.toml' }}</span>
       </div>
       <div v-if="parseError" class="msg msg-err msg-sm">{{ parseError }}</div>
       <textarea
@@ -988,12 +1180,41 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
       </div>
     </article>
 
+    <!-- ====== 说明 (Help) ====== -->
+    <article v-if="activeView === 'help'" class="body">
+      <section class="help-panel">
+        <div class="help-top">
+          <div>
+            <h2>frp 下载与使用说明</h2>
+            <p>说明内容来自应用内置 Markdown，打包后不依赖外部文档文件。</p>
+          </div>
+          <button class="btn btn-ghost" type="button" @click="loadHelp">刷新说明</button>
+        </div>
+        <div class="help-download">
+          <span>当前下载链接</span>
+          <a :href="downloadTarget.url" target="_blank" rel="noreferrer">{{ downloadTarget.url || '读取中...' }}</a>
+        </div>
+        <div class="help-content">
+          <template v-for="(block, index) in renderedHelpBlocks" :key="index">
+            <h1 v-if="block.type === 'heading' && block.level === 1">{{ block.text }}</h1>
+            <h2 v-else-if="block.type === 'heading' && block.level === 2">{{ block.text }}</h2>
+            <h3 v-else-if="block.type === 'heading'">{{ block.text }}</h3>
+            <p v-else-if="block.type === 'paragraph'">{{ block.text }}</p>
+            <ul v-else-if="block.type === 'list'">
+              <li v-for="item in block.items" :key="item">{{ item }}</li>
+            </ul>
+            <pre v-else-if="block.type === 'code'"><code>{{ block.text }}</code></pre>
+          </template>
+        </div>
+      </section>
+    </article>
+
     <div v-if="showSettings" class="modal-backdrop" @click.self="showSettings = false">
       <section class="settings-modal">
         <div class="modal-head">
           <div>
             <h2>设置</h2>
-            <p>目录变更后会立即用于读取配置、安装 frpc 和启动服务。</p>
+            <p>工具路径和配置路径会立即用于下载、验证、启动和自启动 frpc。</p>
           </div>
           <button class="btn btn-sm btn-ghost" @click="showSettings = false">关闭</button>
         </div>
@@ -1008,19 +1229,38 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
           </label>
 
           <label class="settings-field">
-            <span>工作目录</span>
+            <span>工具路径</span>
             <div class="path-row">
-              <input v-model="settingsDraft.rootDir" class="input" type="text" placeholder="~/frp-client" />
-              <button class="btn btn-ghost" type="button" @click="pickRootDir">选择</button>
+              <input v-model="settingsDraft.toolPath" class="input" type="text" placeholder="~/frp-client/frpc" />
+              <button class="btn btn-ghost" type="button" @click="pickToolPath">选择</button>
             </div>
+            <small v-if="settingsFileStatus && !settingsFileStatus.toolExists" class="field-help warning-help">
+              {{ settingsFileStatus.toolHelp }}
+            </small>
           </label>
 
           <label class="settings-field">
-            <span>工具目录</span>
+            <span>配置路径</span>
             <div class="path-row">
-              <input v-model="settingsDraft.toolsDir" class="input" type="text" placeholder="~/frp-client/.tools" />
-              <button class="btn btn-ghost" type="button" @click="pickToolsDir">选择</button>
+              <input v-model="settingsDraft.configPath" class="input" type="text" placeholder="~/frp-client/frpc.toml" />
+              <button class="btn btn-ghost" type="button" @click="pickConfigPath">选择</button>
             </div>
+            <small v-if="settingsFileStatus && !settingsFileStatus.configExists" class="field-help warning-help">
+              {{ settingsFileStatus.configHelp }}
+            </small>
+          </label>
+
+          <label class="settings-field">
+            <span>下载链接</span>
+            <input
+              v-model="settingsDraft.downloadUrl"
+              class="input"
+              type="text"
+              placeholder="https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
+            />
+            <small class="field-help">
+              支持 {tag}、{version}、{filename} 占位符；下载按钮会使用这里的链接，下载后仍解压到工具路径。
+            </small>
           </label>
 
           <label class="settings-toggle">
@@ -1028,14 +1268,19 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
             <span class="toggle-visual"></span>
             <span class="toggle-copy">
               <strong>开机自启动 frpc 服务</strong>
-              <small>使用当前工具目录中的 frpc，并加载工作目录下的 config/frpc.toml。</small>
+              <small>使用工具路径中的 frpc，并加载配置路径中的 frpc.toml。</small>
             </span>
           </label>
+
+          <div v-if="settingsFileStatus" class="settings-note">
+            {{ settingsFileStatus.downloadHelp }}
+          </div>
         </div>
 
         <div v-if="settingsError" class="msg msg-err msg-sm">{{ settingsError }}</div>
 
         <div class="form-actions">
+          <button class="btn btn-red" type="button" @click="resetAppSettings">重置默认设置</button>
           <button class="btn btn-ghost" type="button" @click="showSettings = false">取消</button>
           <button class="btn btn-blue" type="button" @click="saveAppSettings">保存设置</button>
         </div>
@@ -1171,9 +1416,49 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 180px;
+}
+
+.panel-cell:nth-child(2) {
+  flex: 1;
+}
+
+.download-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+
+.download-head code {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-file {
+  padding: 4px 8px;
+  border: 1px solid var(--border-muted);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+}
+
+.command-input {
+  width: 100%;
+  font-family: 'SF Mono', 'Menlo', monospace;
 }
 
 .panel-btn {
+  flex-direction: row;
+  gap: 8px;
   justify-content: flex-end;
 }
 
@@ -1672,6 +1957,102 @@ tbody tr:hover {
   padding: 0 14px 14px;
 }
 
+/* ---- help ---- */
+.help-panel {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.help-top,
+.help-download {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.help-top h2 {
+  margin: 0 0 4px;
+  color: var(--text-strong);
+  font-size: 20px;
+}
+
+.help-top p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.help-download {
+  margin-top: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.help-download span {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.help-download a {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--log-info);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.help-content {
+  display: grid;
+  gap: 10px;
+  padding: 18px 0 40px;
+}
+
+.help-content h1,
+.help-content h2,
+.help-content h3 {
+  margin: 12px 0 2px;
+  color: var(--text-strong);
+}
+
+.help-content h1 { font-size: 22px; }
+.help-content h2 { font-size: 17px; }
+.help-content h3 { font-size: 14px; }
+
+.help-content p,
+.help-content li {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.help-content ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.help-content pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* ---- labels / inputs ---- */
 .label {
   font-size: 11px;
@@ -1836,6 +2217,10 @@ tbody tr:hover {
   font-weight: 700;
 }
 
+.warning-help {
+  color: var(--warn);
+}
+
 .path-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1929,6 +2314,16 @@ tbody tr:hover {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.settings-note {
+  padding: 10px 12px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 @media (max-width: 900px) {

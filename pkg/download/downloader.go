@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +42,8 @@ type DownloadProgress struct {
 	Done       bool
 	Error      string
 }
+
+var ErrDownloadCanceled = errors.New("下载已停止")
 
 func (dp *DownloadProgress) Reset() {
 	dp.mu.Lock()
@@ -114,7 +118,6 @@ func (dp *DownloadProgress) GetError() string {
 
 type ProgressWriter struct {
 	Progress *DownloadProgress
-	Writer   io.Writer
 }
 
 func (pw *ProgressWriter) Write(p []byte) (int, error) {
@@ -125,6 +128,8 @@ func (pw *ProgressWriter) Write(p []byte) (int, error) {
 
 var downloadProgress *DownloadProgress
 var downloadProgressMu sync.Mutex
+var activeDownloadCancel context.CancelFunc
+var activeDownloadMu sync.Mutex
 
 func GetDownloadProgress() *DownloadProgress {
 	downloadProgressMu.Lock()
@@ -133,6 +138,33 @@ func GetDownloadProgress() *DownloadProgress {
 		downloadProgress = &DownloadProgress{}
 	}
 	return downloadProgress
+}
+
+func StartDownloadContext() context.Context {
+	activeDownloadMu.Lock()
+	defer activeDownloadMu.Unlock()
+	if activeDownloadCancel != nil {
+		activeDownloadCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	activeDownloadCancel = cancel
+	return ctx
+}
+
+func FinishDownloadContext() {
+	activeDownloadMu.Lock()
+	defer activeDownloadMu.Unlock()
+	activeDownloadCancel = nil
+}
+
+func CancelDownload() {
+	activeDownloadMu.Lock()
+	cancel := activeDownloadCancel
+	activeDownloadCancel = nil
+	activeDownloadMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func LoadMirrors(configPath string) ([]Mirror, error) {
@@ -178,7 +210,16 @@ func BuildDownloadURL(mirror Mirror, version, osName, arch string) string {
 		ext = ".zip"
 	}
 	filename := fmt.Sprintf("frp_%s_%s_%s%s", versionNum, osName, arch, ext)
-	url := strings.ReplaceAll(mirror.Template, "{tag}", version)
+	return BuildDownloadURLFromTemplate(mirror.Template, version, filename)
+}
+
+func BuildDownloadURLFromTemplate(template, version, filename string) string {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		template = "https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
+	}
+	url := strings.ReplaceAll(template, "{tag}", version)
+	url = strings.ReplaceAll(url, "{version}", strings.TrimPrefix(version, "v"))
 	url = strings.ReplaceAll(url, "{filename}", filename)
 	return url
 }
@@ -192,10 +233,17 @@ func BuildFilename(version, osName, arch string) string {
 	return fmt.Sprintf("frp_%s_%s_%s%s", versionNum, osName, arch, ext)
 }
 
-func DownloadFile(url, destPath string, progress *DownloadProgress) error {
+func DownloadFile(ctx context.Context, url, destPath string, progress *DownloadProgress) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		return fmt.Errorf("创建下载请求失败: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			return ErrDownloadCanceled
+		}
 		return fmt.Errorf("下载失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -214,11 +262,13 @@ func DownloadFile(url, destPath string, progress *DownloadProgress) error {
 
 	writer := io.MultiWriter(out, &ProgressWriter{
 		Progress: progress,
-		Writer:   out,
 	})
 
 	_, err = io.Copy(writer, resp.Body)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			return ErrDownloadCanceled
+		}
 		return fmt.Errorf("下载写入失败: %w", err)
 	}
 
@@ -233,7 +283,18 @@ func ExtractFrpc(archivePath, destDir, osName string) error {
 	return extractTarGz(archivePath, destDir)
 }
 
+func ExtractFrpcToFile(archivePath, destPath, osName string) error {
+	if strings.HasSuffix(archivePath, ".zip") || osName == "windows" {
+		return extractZipToFile(archivePath, destPath)
+	}
+	return extractTarGzToFile(archivePath, destPath)
+}
+
 func extractTarGz(archivePath, destDir string) error {
+	return extractTarGzToFile(archivePath, filepath.Join(destDir, "frpc"))
+}
+
+func extractTarGzToFile(archivePath, destPath string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -248,7 +309,9 @@ func extractTarGz(archivePath, destDir string) error {
 
 	tarReader := tar.NewReader(gzReader)
 
-	os.MkdirAll(destDir, 0755)
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
 
 	for {
 		header, err := tarReader.Next()
@@ -260,8 +323,6 @@ func extractTarGz(archivePath, destDir string) error {
 		}
 
 		if strings.HasSuffix(header.Name, "frpc") || strings.HasSuffix(header.Name, "frpc.exe") {
-			basename := filepath.Base(header.Name)
-			destPath := filepath.Join(destDir, basename)
 			outFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 			if err != nil {
 				return err
@@ -277,19 +338,22 @@ func extractTarGz(archivePath, destDir string) error {
 }
 
 func extractZip(archivePath, destDir string) error {
+	return extractZipToFile(archivePath, filepath.Join(destDir, "frpc.exe"))
+}
+
+func extractZipToFile(archivePath, destPath string) error {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
 
-	os.MkdirAll(destDir, 0755)
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
 
 	for _, file := range reader.File {
 		if strings.HasSuffix(file.Name, "frpc.exe") || strings.HasSuffix(file.Name, "frpc") {
-			basename := filepath.Base(file.Name)
-			destPath := filepath.Join(destDir, basename)
-
 			rc, err := file.Open()
 			if err != nil {
 				return err
@@ -316,9 +380,15 @@ func CheckFrpcExists(toolsDir, platform string) bool {
 	if platform == "windows" || runtime.GOOS == "windows" {
 		ext = ".exe"
 	}
-	frpcPath := filepath.Join(toolsDir, platform, "frpc"+ext)
-	_, err := os.Stat(frpcPath)
-	return err == nil
+	for _, frpcPath := range []string{
+		filepath.Join(toolsDir, "frpc"+ext),
+		filepath.Join(toolsDir, platform, "frpc"+ext),
+	} {
+		if _, err := os.Stat(frpcPath); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func ReadVersionFile(toolsDir string) string {

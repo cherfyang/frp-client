@@ -45,14 +45,31 @@ export namespace frp {
 	        this.binaryPath = source["binaryPath"];
 	    }
 	}
+	export class FrpcProcessInfo {
+	    pids: number[];
+	    killCommand: string;
+	    message: string;
+
+	    static createFrom(source: any = {}) {
+	        return new FrpcProcessInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pids = source["pids"];
+	        this.killCommand = source["killCommand"];
+	        this.message = source["message"];
+	    }
+	}
 
 }
 
 export namespace main {
 
 	export class AppSettings {
-	    rootDir: string;
-	    toolsDir: string;
+	    toolPath: string;
+	    configPath: string;
+	    downloadUrl: string;
 	    theme: string;
 	    autoStart: boolean;
 
@@ -62,10 +79,53 @@ export namespace main {
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.rootDir = source["rootDir"];
-	        this.toolsDir = source["toolsDir"];
+	        this.toolPath = source["toolPath"];
+	        this.configPath = source["configPath"];
+	        this.downloadUrl = source["downloadUrl"];
 	        this.theme = source["theme"];
 	        this.autoStart = source["autoStart"];
+	    }
+	}
+	export class DownloadTarget {
+	    url: string;
+	    filename: string;
+	    version: string;
+
+	    static createFrom(source: any = {}) {
+	        return new DownloadTarget(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.filename = source["filename"];
+	        this.version = source["version"];
+	    }
+	}
+	export class SettingsFileStatus {
+	    toolExists: boolean;
+	    configExists: boolean;
+	    toolPath: string;
+	    configPath: string;
+	    toolHelp: string;
+	    configHelp: string;
+	    downloadHelp: string;
+	    manualKillHelp: string;
+
+	    static createFrom(source: any = {}) {
+	        return new SettingsFileStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.toolExists = source["toolExists"];
+	        this.configExists = source["configExists"];
+	        this.toolPath = source["toolPath"];
+	        this.configPath = source["configPath"];
+	        this.toolHelp = source["toolHelp"];
+	        this.configHelp = source["configHelp"];
+	        this.downloadHelp = source["downloadHelp"];
+	        this.manualKillHelp = source["manualKillHelp"];
 	    }
 	}
 

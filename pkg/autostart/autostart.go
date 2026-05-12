@@ -17,23 +17,21 @@ const (
 	windowsRunName   = "frp-client-frpc"
 )
 
-func Enable(rootDir, toolsDir string) error {
-	frpcPath := frp.FindManagedFrpcBinary(toolsDir)
-	if frpcPath == "" {
-		return fmt.Errorf("工具目录中未找到 frpc 可执行文件，请先安装")
+func Enable(toolPath, configPath string) error {
+	if _, err := os.Stat(toolPath); err != nil {
+		return fmt.Errorf("未找到 frpc 可执行文件: %s", toolPath)
 	}
-	configPath := frp.GetConfigPath(rootDir)
 	if _, err := os.Stat(configPath); err != nil {
 		return fmt.Errorf("配置文件不存在: %s", configPath)
 	}
 
 	switch runtime.GOOS {
 	case "darwin":
-		return enableLaunchAgent(rootDir, frpcPath, configPath)
+		return enableLaunchAgent(toolPath, configPath)
 	case "windows":
-		return enableWindowsRun(rootDir, frpcPath, configPath)
+		return enableWindowsRun(toolPath, configPath)
 	case "linux":
-		return enableLinuxAutostart(rootDir, frpcPath, configPath)
+		return enableLinuxAutostart(toolPath, configPath)
 	default:
 		return fmt.Errorf("当前系统暂不支持开机自启动: %s", runtime.GOOS)
 	}
@@ -71,7 +69,7 @@ func IsEnabled() bool {
 	}
 }
 
-func enableLaunchAgent(rootDir, frpcPath, configPath string) error {
+func enableLaunchAgent(toolPath, configPath string) error {
 	path := launchAgentPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("创建 LaunchAgents 目录失败: %w", err)
@@ -100,19 +98,19 @@ func enableLaunchAgent(rootDir, frpcPath, configPath string) error {
   <string>%s</string>
 </dict>
 </plist>
-`, launchAgentLabel, escapeXML(frpcPath), escapeXML(configPath), escapeXML(rootDir), escapeXML(frp.GetLogPath(rootDir)), escapeXML(frp.GetLogPath(rootDir)))
+`, launchAgentLabel, escapeXML(toolPath), escapeXML(configPath), escapeXML(frp.ConfigBaseDir(configPath)), escapeXML(frp.GetLogPath(configPath)), escapeXML(frp.GetLogPath(configPath)))
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("写入 LaunchAgent 失败: %w", err)
 	}
 	return nil
 }
 
-func enableWindowsRun(rootDir, frpcPath, configPath string) error {
-	command := fmt.Sprintf(`cmd /C cd /D "%s" && "%s" -c "%s"`, rootDir, frpcPath, configPath)
+func enableWindowsRun(toolPath, configPath string) error {
+	command := fmt.Sprintf(`cmd /C cd /D "%s" && "%s" -c "%s"`, frp.ConfigBaseDir(configPath), toolPath, configPath)
 	return exec.Command("reg", "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", windowsRunName, "/t", "REG_SZ", "/d", command, "/f").Run()
 }
 
-func enableLinuxAutostart(rootDir, frpcPath, configPath string) error {
+func enableLinuxAutostart(toolPath, configPath string) error {
 	path := linuxDesktopPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("创建 autostart 目录失败: %w", err)
@@ -125,7 +123,7 @@ Exec=%s -c %s
 Path=%s
 Terminal=false
 X-GNOME-Autostart-enabled=true
-`, desktopQuote(frpcPath), desktopQuote(configPath), rootDir)
+`, desktopQuote(toolPath), desktopQuote(configPath), frp.ConfigBaseDir(configPath))
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("写入 Linux 自启动文件失败: %w", err)
 	}

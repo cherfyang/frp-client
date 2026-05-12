@@ -25,51 +25,26 @@ type FrpStatus struct {
 	BinaryPath string `json:"binaryPath"`
 }
 
-func FindManagedFrpcBinary(toolsDir string) string {
-	var platform string
-	switch runtime.GOOS {
-	case "darwin":
-		platform = "darwin"
-	case "windows":
-		platform = "windows"
-	default:
-		platform = "linux"
-	}
-
-	ext := ""
-	if platform == "windows" {
-		ext = ".exe"
-	}
-	frpcPath := filepath.Join(toolsDir, platform, "frpc"+ext)
-
-	if _, err := os.Stat(frpcPath); err == nil {
-		return frpcPath
-	}
-	return ""
+type FrpcProcessInfo struct {
+	PIDs        []int  `json:"pids"`
+	KillCommand string `json:"killCommand"`
+	Message     string `json:"message"`
 }
 
-func FindFrpcBinary(toolsDir string) string {
-	if frpcPath := FindManagedFrpcBinary(toolsDir); frpcPath != "" {
-		return frpcPath
+func ConfigBaseDir(configPath string) string {
+	dir := filepath.Dir(configPath)
+	if dir == "." || dir == "" {
+		return "."
 	}
-
-	pathFrpc := "frpc"
-	if runtime.GOOS == "windows" {
-		pathFrpc = "frpc.exe"
-	}
-	if _, err := exec.LookPath(pathFrpc); err == nil {
-		return pathFrpc
-	}
-
-	return ""
+	return dir
 }
 
-func GetPidPath(rootDir string) string {
-	return filepath.Join(rootDir, ".frpc.pid")
+func GetPidPath(configPath string) string {
+	return filepath.Join(ConfigBaseDir(configPath), ".frpc.pid")
 }
 
-func GetLogPath(rootDir string) string {
-	return filepath.Join(rootDir, ".frpc.log")
+func GetLogPath(configPath string) string {
+	return filepath.Join(ConfigBaseDir(configPath), ".frpc.log")
 }
 
 func readPID(pidFile string) (int, error) {
@@ -199,15 +174,22 @@ func stopProcess(pid int) error {
 	return process.Signal(syscall.SIGKILL)
 }
 
-func StopSystemFrpcProcesses(rootDir string) error {
+func ListFrpcProcesses() (FrpcProcessInfo, error) {
 	pids, err := listSystemFrpcPIDs()
 	if err != nil {
-		return fmt.Errorf("检查本机 frpc 进程失败: %w", err)
+		return FrpcProcessInfo{}, fmt.Errorf("检查本机 frpc 进程失败: %w", err)
 	}
+	return FrpcProcessInfo{
+		PIDs:        pids,
+		KillCommand: BuildKillCommand(pids),
+		Message:     BuildProcessMessage(pids),
+	}, nil
+}
+
+func KillFrpcProcesses(pids []int) error {
 	if len(pids) == 0 {
 		return nil
 	}
-
 	var failures []string
 	currentPID := os.Getpid()
 	for _, pid := range pids {
@@ -218,11 +200,43 @@ func StopSystemFrpcProcesses(rootDir string) error {
 			failures = append(failures, fmt.Sprintf("PID %d: %v", pid, err))
 		}
 	}
-	_ = os.Remove(GetPidPath(rootDir))
 	if len(failures) > 0 {
 		return fmt.Errorf("停止已运行的 frpc 失败: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func BuildKillCommand(pids []int) string {
+	if len(pids) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if runtime.GOOS == "windows" {
+			parts = append(parts, fmt.Sprintf("taskkill /PID %d /F", pid))
+		} else {
+			parts = append(parts, fmt.Sprintf("kill -9 %d", pid))
+		}
+	}
+	return strings.Join(parts, " && ")
+}
+
+func BuildProcessMessage(pids []int) string {
+	if len(pids) == 0 {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("检测到本机已有 frpc.exe 进程正在运行，PID: %s。是否先结束这些进程？", joinPIDs(pids))
+	}
+	return fmt.Sprintf("检测到本机已有 frpc 进程正在运行，PID: %s。是否先结束这些进程？", joinPIDs(pids))
+}
+
+func joinPIDs(pids []int) string {
+	parts := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		parts = append(parts, strconv.Itoa(pid))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func readProcessStartTime(pid int) (time.Time, error) {
@@ -276,14 +290,15 @@ func readProcessStartTime(pid int) (time.Time, error) {
 	return startTime, nil
 }
 
-func GetStatus(rootDir, toolsDir string) FrpStatus {
+func GetStatus(configPath, toolPath string) FrpStatus {
 	status := FrpStatus{
 		Running:    false,
-		LogPath:    GetLogPath(rootDir),
-		ConfigPath: GetConfigPath(rootDir),
+		LogPath:    GetLogPath(configPath),
+		ConfigPath: configPath,
+		BinaryPath: toolPath,
 	}
 
-	pidFile := GetPidPath(rootDir)
+	pidFile := GetPidPath(configPath)
 	pid, err := readPID(pidFile)
 	if err != nil {
 		return status
@@ -312,10 +327,8 @@ func GetStatus(rootDir, toolsDir string) FrpStatus {
 		}
 	}
 
-	frpcPath := FindFrpcBinary(toolsDir)
-	if frpcPath != "" {
-		status.BinaryPath = frpcPath
-		cmd := exec.Command(frpcPath, "--version")
+	if toolPath != "" {
+		cmd := exec.Command(toolPath, "--version")
 		output, _ := cmd.CombinedOutput()
 		status.Version = strings.TrimSpace(string(output))
 	}
@@ -323,24 +336,22 @@ func GetStatus(rootDir, toolsDir string) FrpStatus {
 	return status
 }
 
-func StartFrp(rootDir, toolsDir string) error {
-	frpcPath := FindFrpcBinary(toolsDir)
-	if frpcPath == "" {
-		return fmt.Errorf("未找到 frpc 可执行文件，请先安装")
+func StartFrp(configPath, toolPath string) error {
+	if _, err := os.Stat(toolPath); err != nil {
+		return fmt.Errorf("未找到 frpc 可执行文件: %s", toolPath)
 	}
 
-	configPath := GetConfigPath(rootDir)
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return fmt.Errorf("配置文件不存在: %s", configPath)
 	}
 
-	if err := StopSystemFrpcProcesses(rootDir); err != nil {
-		return err
+	baseDir := ConfigBaseDir(configPath)
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return fmt.Errorf("创建配置目录失败: %w", err)
 	}
-	time.Sleep(300 * time.Millisecond)
 
-	pidFile := GetPidPath(rootDir)
-	logFile := GetLogPath(rootDir)
+	pidFile := GetPidPath(configPath)
+	logFile := GetLogPath(configPath)
 
 	logWriter, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -348,8 +359,8 @@ func StartFrp(rootDir, toolsDir string) error {
 	}
 	defer logWriter.Close()
 
-	cmd := exec.Command(frpcPath, "-c", configPath)
-	cmd.Dir = rootDir
+	cmd := exec.Command(toolPath, "-c", configPath)
+	cmd.Dir = baseDir
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 
@@ -382,8 +393,8 @@ func StartFrp(rootDir, toolsDir string) error {
 	return nil
 }
 
-func StopFrp(rootDir string) error {
-	pidFile := GetPidPath(rootDir)
+func StopFrp(configPath string) error {
+	pidFile := GetPidPath(configPath)
 	pid, err := readPID(pidFile)
 	if err != nil {
 		return fmt.Errorf("frpc 未在运行")
@@ -402,12 +413,12 @@ func StopFrp(rootDir string) error {
 	return nil
 }
 
-func RestartFrp(rootDir, toolsDir string) error {
-	return StartFrp(rootDir, toolsDir)
+func RestartFrp(configPath, toolPath string) error {
+	return StartFrp(configPath, toolPath)
 }
 
-func GetLogs(rootDir string, lines int) string {
-	logPath := GetLogPath(rootDir)
+func GetLogs(configPath string, lines int) string {
+	logPath := GetLogPath(configPath)
 	data, err := readTail(logPath, 512*1024)
 	if err != nil {
 		return ""
