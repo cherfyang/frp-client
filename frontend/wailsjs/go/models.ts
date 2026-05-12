@@ -54,6 +54,7 @@ export namespace main {
 	    rootDir: string;
 	    toolsDir: string;
 	    theme: string;
+	    autoStart: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new AppSettings(source);
@@ -64,6 +65,7 @@ export namespace main {
 	        this.rootDir = source["rootDir"];
 	        this.toolsDir = source["toolsDir"];
 	        this.theme = source["theme"];
+	        this.autoStart = source["autoStart"];
 	    }
 	}
 

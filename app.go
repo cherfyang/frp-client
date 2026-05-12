@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"frp-client/pkg/autostart"
 	"frp-client/pkg/download"
 	"frp-client/pkg/frp"
 	"frp-client/pkg/system"
@@ -23,9 +24,10 @@ type App struct {
 }
 
 type AppSettings struct {
-	RootDir  string `json:"rootDir"`
-	ToolsDir string `json:"toolsDir"`
-	Theme    string `json:"theme"`
+	RootDir   string `json:"rootDir"`
+	ToolsDir  string `json:"toolsDir"`
+	Theme     string `json:"theme"`
+	AutoStart bool   `json:"autoStart"`
 }
 
 func NewApp() *App {
@@ -38,9 +40,10 @@ func NewApp() *App {
 		theme = "dark"
 	}
 	settings = AppSettings{
-		RootDir:  rootDir,
-		ToolsDir: toolsDir,
-		Theme:    theme,
+		RootDir:   rootDir,
+		ToolsDir:  toolsDir,
+		Theme:     theme,
+		AutoStart: autostart.IsEnabled(),
 	}
 	_ = ensureAppDirs(settings)
 	_ = saveSettings(settingsPath, settings)
@@ -145,11 +148,19 @@ func (a *App) SaveSettings(settings AppSettings) (AppSettings, error) {
 		theme = "dark"
 	}
 	next := AppSettings{
-		RootDir:  rootDir,
-		ToolsDir: toolsDir,
-		Theme:    theme,
+		RootDir:   rootDir,
+		ToolsDir:  toolsDir,
+		Theme:     theme,
+		AutoStart: settings.AutoStart,
 	}
 	if err := ensureAppDirs(next); err != nil {
+		return a.settings, err
+	}
+	if next.AutoStart {
+		if err := autostart.Enable(next.RootDir, next.ToolsDir); err != nil {
+			return a.settings, err
+		}
+	} else if err := autostart.Disable(); err != nil {
 		return a.settings, err
 	}
 	if err := saveSettings(a.settingsPath, next); err != nil {

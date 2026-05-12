@@ -57,7 +57,9 @@ type AppSettingsView = {
   rootDir: string;
   toolsDir: string;
   theme: 'dark' | 'light';
+  autoStart: boolean;
 };
+type LogLineLevel = 'info' | 'warn' | 'error' | 'debug' | 'default';
 
 const moduleTabs: Array<{ id: ViewId; label: string }> = [
   { id: 'editor', label: '配置文件' },
@@ -80,6 +82,7 @@ const settingsDraft = reactive<AppSettingsView>({
   rootDir: '',
   toolsDir: '',
   theme: 'dark',
+  autoStart: false,
 });
 const settingsError = ref('');
 
@@ -129,6 +132,24 @@ const presetOptions = computed(() =>
 const sortedMirrors = computed(() =>
   mirrors.value.filter((m) => m.type !== 'custom'),
 );
+const renderedLogLines = computed(() => {
+  const text = frpLogs.value.trim();
+  if (!text) return [];
+  return text.split('\n').map((content, index) => ({
+    id: `${index}-${content}`,
+    content,
+    level: detectLogLevel(content),
+  }));
+});
+
+const detectLogLevel = (line: string): LogLineLevel => {
+  const normalized = line.toLowerCase();
+  if (/\b(error|fatal|panic|failed|fail)\b/.test(normalized) || /\[e\]/.test(normalized)) return 'error';
+  if (/\b(warn|warning)\b/.test(normalized) || /\[w\]/.test(normalized)) return 'warn';
+  if (/\b(info)\b/.test(normalized) || /\[i\]/.test(normalized)) return 'info';
+  if (/\b(debug|trace)\b/.test(normalized) || /\[d\]|\[t\]/.test(normalized)) return 'debug';
+  return 'default';
+};
 
 const isRunning = computed(() => frpStatus.value.running);
 const proxyCount = computed(() => parsedDocument.value.sectionCounts.proxies || 0);
@@ -168,6 +189,7 @@ const applySettingsToState = (settings: AppSettingsView) => {
   settingsDraft.rootDir = settings.rootDir;
   settingsDraft.toolsDir = settings.toolsDir;
   settingsDraft.theme = theme.value;
+  settingsDraft.autoStart = Boolean(settings.autoStart);
 };
 
 const preferredOrder = ['name', 'type', 'serverName', 'localIP', 'localPort', 'remotePort', 'bindAddr', 'bindPort'];
@@ -276,6 +298,7 @@ const openSettings = () => {
   settingsDraft.rootDir = rootDir.value;
   settingsDraft.toolsDir = toolsDir.value || `${rootDir.value}/.tools`;
   settingsDraft.theme = theme.value;
+  settingsDraft.autoStart = Boolean(settingsDraft.autoStart);
   showSettings.value = true;
 };
 
@@ -305,6 +328,7 @@ const saveAppSettings = async () => {
       rootDir: settingsDraft.rootDir,
       toolsDir: settingsDraft.toolsDir,
       theme: settingsDraft.theme,
+      autoStart: settingsDraft.autoStart,
     }) as AppSettingsView;
     applySettingsToState(next);
     showSettings.value = false;
@@ -420,12 +444,16 @@ onBeforeUnmount(() => {
 
 const handleStart = async () => {
   actionError.value = '';
+  showLogs.value = true;
+  await refreshLogs();
   try {
     await StartFrp();
     actionSuccess.value = 'frpc 已启动';
     await refreshFrpStatus();
+    await refreshLogs();
   } catch (e: any) {
     actionError.value = e.message || String(e);
+    await refreshLogs();
   }
 };
 
@@ -679,7 +707,17 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
         <span class="log-title">frpc 日志</span>
         <button class="btn btn-xs btn-ghost" @click="refreshLogs">刷新</button>
       </div>
-      <pre class="log-body">{{ frpLogs || '(暂无日志)' }}</pre>
+      <div class="log-body">
+        <div v-if="!renderedLogLines.length" class="log-empty">(暂无日志)</div>
+        <div
+          v-for="line in renderedLogLines"
+          :key="line.id"
+          class="log-line"
+          :class="`log-line-${line.level}`"
+        >
+          {{ line.content }}
+        </div>
+      </div>
     </section>
 
     <!-- 消息 -->
@@ -984,6 +1022,15 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
               <button class="btn btn-ghost" type="button" @click="pickToolsDir">选择</button>
             </div>
           </label>
+
+          <label class="settings-toggle">
+            <input v-model="settingsDraft.autoStart" type="checkbox" />
+            <span class="toggle-visual"></span>
+            <span class="toggle-copy">
+              <strong>开机自启动 frpc 服务</strong>
+              <small>使用当前工具目录中的 frpc，并加载工作目录下的 config/frpc.toml。</small>
+            </span>
+          </label>
         </div>
 
         <div v-if="settingsError" class="msg msg-err msg-sm">{{ settingsError }}</div>
@@ -1019,6 +1066,10 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
   --ok: #3fb950;
   --danger: #f85149;
   --warn: #d29922;
+  --log-info: #58a6ff;
+  --log-warn: #d29922;
+  --log-error: #ff7b72;
+  --log-debug: #a371f7;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -1044,6 +1095,10 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
   --ok: #16833a;
   --danger: #dc2626;
   --warn: #b7791f;
+  --log-info: #2563eb;
+  --log-warn: #b7791f;
+  --log-error: #dc2626;
+  --log-debug: #7c3aed;
 }
 
 /* ---- header ---- */
@@ -1155,6 +1210,30 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
   color: var(--muted);
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.log-empty {
+  color: var(--muted-2);
+}
+
+.log-line {
+  min-height: 17px;
+}
+
+.log-line-info {
+  color: var(--log-info);
+}
+
+.log-line-warn {
+  color: var(--log-warn);
+}
+
+.log-line-error {
+  color: var(--log-error);
+}
+
+.log-line-debug {
+  color: var(--log-debug);
 }
 
 .progress {
@@ -1785,6 +1864,71 @@ tbody tr:hover {
 .segmented button.active {
   background: var(--accent);
   color: #fff;
+}
+
+.settings-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.settings-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toggle-visual {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+}
+
+.toggle-visual::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.settings-toggle input:checked + .toggle-visual {
+  background: rgba(47, 129, 247, 0.18);
+  border-color: var(--accent);
+}
+
+.settings-toggle input:checked + .toggle-visual::after {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+
+.toggle-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.toggle-copy strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.toggle-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 @media (max-width: 900px) {

@@ -2,6 +2,7 @@ package frp
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +25,7 @@ type FrpStatus struct {
 	BinaryPath string `json:"binaryPath"`
 }
 
-func FindFrpcBinary(toolsDir string) string {
+func FindManagedFrpcBinary(toolsDir string) string {
 	var platform string
 	switch runtime.GOOS {
 	case "darwin":
@@ -44,9 +45,16 @@ func FindFrpcBinary(toolsDir string) string {
 	if _, err := os.Stat(frpcPath); err == nil {
 		return frpcPath
 	}
+	return ""
+}
+
+func FindFrpcBinary(toolsDir string) string {
+	if frpcPath := FindManagedFrpcBinary(toolsDir); frpcPath != "" {
+		return frpcPath
+	}
 
 	pathFrpc := "frpc"
-	if platform == "windows" {
+	if runtime.GOOS == "windows" {
 		pathFrpc = "frpc.exe"
 	}
 	if _, err := exec.LookPath(pathFrpc); err == nil {
@@ -91,6 +99,130 @@ func isProcessRunning(pid int) bool {
 	}
 	err = process.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+func listSystemFrpcPIDs() ([]int, error) {
+	if runtime.GOOS == "windows" {
+		return listWindowsFrpcPIDs()
+	}
+	pids, err := listUnixFrpcPIDsByPgrep()
+	if err == nil {
+		return pids, nil
+	}
+	return listUnixFrpcPIDsByPS()
+}
+
+func listUnixFrpcPIDsByPgrep() ([]int, error) {
+	output, err := exec.Command("pgrep", "-x", "frpc").Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && len(output) == 0 && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parsePIDLines(string(output)), nil
+}
+
+func listUnixFrpcPIDsByPS() ([]int, error) {
+	output, err := exec.Command("ps", "-axo", "pid=,comm=").Output()
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		if filepath.Base(fields[1]) != "frpc" {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+func listWindowsFrpcPIDs() ([]int, error) {
+	output, err := exec.Command("tasklist", "/FI", "IMAGENAME eq frpc.exe", "/FO", "CSV", "/NH").Output()
+	if err != nil {
+		return nil, err
+	}
+	reader := csv.NewReader(strings.NewReader(string(output)))
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, record := range records {
+		if len(record) < 2 || !strings.EqualFold(record[0], "frpc.exe") {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(record[1]))
+		if err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+func parsePIDLines(output string) []int {
+	var pids []int
+	for _, line := range strings.Split(output, "\n") {
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+func stopProcess(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return process.Kill()
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	for i := 0; i < 20; i++ {
+		if !isProcessRunning(pid) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return process.Signal(syscall.SIGKILL)
+}
+
+func StopSystemFrpcProcesses(rootDir string) error {
+	pids, err := listSystemFrpcPIDs()
+	if err != nil {
+		return fmt.Errorf("检查本机 frpc 进程失败: %w", err)
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+
+	var failures []string
+	currentPID := os.Getpid()
+	for _, pid := range pids {
+		if pid <= 0 || pid == currentPID {
+			continue
+		}
+		if err := stopProcess(pid); err != nil {
+			failures = append(failures, fmt.Sprintf("PID %d: %v", pid, err))
+		}
+	}
+	_ = os.Remove(GetPidPath(rootDir))
+	if len(failures) > 0 {
+		return fmt.Errorf("停止已运行的 frpc 失败: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func readProcessStartTime(pid int) (time.Time, error) {
@@ -192,11 +324,6 @@ func GetStatus(rootDir, toolsDir string) FrpStatus {
 }
 
 func StartFrp(rootDir, toolsDir string) error {
-	status := GetStatus(rootDir, toolsDir)
-	if status.Running {
-		return fmt.Errorf("frpc 已在运行中 (PID: %d)", status.PID)
-	}
-
 	frpcPath := FindFrpcBinary(toolsDir)
 	if frpcPath == "" {
 		return fmt.Errorf("未找到 frpc 可执行文件，请先安装")
@@ -206,6 +333,11 @@ func StartFrp(rootDir, toolsDir string) error {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return fmt.Errorf("配置文件不存在: %s", configPath)
 	}
+
+	if err := StopSystemFrpcProcesses(rootDir); err != nil {
+		return err
+	}
+	time.Sleep(300 * time.Millisecond)
 
 	pidFile := GetPidPath(rootDir)
 	logFile := GetLogPath(rootDir)
@@ -262,32 +394,8 @@ func StopFrp(rootDir string) error {
 		return fmt.Errorf("frpc 进程已不存在")
 	}
 
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		os.Remove(pidFile)
-		return fmt.Errorf("查找进程失败: %w", err)
-	}
-
-	if runtime.GOOS == "windows" {
-		if err := process.Kill(); err != nil {
-			return fmt.Errorf("停止 frpc 失败: %w", err)
-		}
-	} else {
-		if err := process.Signal(syscall.SIGTERM); err != nil {
-			return fmt.Errorf("发送停止信号失败: %w", err)
-		}
-
-		for i := 0; i < 20; i++ {
-			if !isProcessRunning(pid) {
-				os.Remove(pidFile)
-				return nil
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if err := process.Signal(syscall.SIGKILL); err != nil {
-			return fmt.Errorf("强制停止 frpc 失败: %w", err)
-		}
+	if err := stopProcess(pid); err != nil {
+		return fmt.Errorf("停止 frpc 失败: %w", err)
 	}
 
 	os.Remove(pidFile)
@@ -295,13 +403,6 @@ func StopFrp(rootDir string) error {
 }
 
 func RestartFrp(rootDir, toolsDir string) error {
-	status := GetStatus(rootDir, toolsDir)
-	if status.Running {
-		if err := StopFrp(rootDir); err != nil {
-			return fmt.Errorf("停止旧进程失败: %w", err)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
 	return StartFrp(rootDir, toolsDir)
 }
 

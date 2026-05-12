@@ -32,12 +32,24 @@ jobs:
         run: |
           cd frontend && npm ci && cd ..
           wails build -platform darwin/${{ matrix.arch }} -clean -o frp-client-darwin-${{ matrix.arch }}
+          mkdir -p release
+          APP_PATH=$(find build/bin -maxdepth 1 -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "macOS .app bundle not found"
+            find build/bin -maxdepth 2 -print
+            exit 1
+          fi
+          APP_NAME="frp-client-macos-${{ matrix.arch }}.app"
+          rm -rf "release/$APP_NAME"
+          mv "$APP_PATH" "release/$APP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "release/$APP_NAME" "release/frp-client-macos-${{ matrix.arch }}.zip"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: frp-client-darwin-${{ matrix.arch }}
-          path: build/bin/
+          name: frp-client-macos-${{ matrix.arch }}
+          path: release/frp-client-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error
 
   build-windows:
     runs-on: windows-latest
@@ -56,15 +68,21 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
       - name: Build
+        shell: pwsh
         run: |
-          cd frontend && npm ci && cd ..
+          Set-Location frontend
+          npm ci
+          Set-Location ..
           wails build -platform windows/amd64 -clean -o frp-client-windows-amd64.exe
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item build\bin\frp-client-windows-amd64.exe release\frp-client-windows-amd64.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: frp-client-windows-amd64
-          path: build/bin/
+          path: release/frp-client-windows-amd64.exe
+          if-no-files-found: error
 
   release:
     needs: [build-macos, build-windows]
@@ -80,5 +98,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.exe
           generate_release_notes: true
