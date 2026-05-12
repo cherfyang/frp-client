@@ -1,20 +1,30 @@
-# 构建产物
-/dist/
-*.tsbuildinfo
-*.js
-*.d.ts
+# Wails 构建产物
+build/
+frontend/dist
+frontend/node_modules
+frontend/package.json.md5
 
-# 依赖
-/node_modules/
+# .tools (frpc 二进制)
+.tools/
+
+# 本机真实配置
+config/frpc.toml
+config/profiles/
 
 # 运行时文件
-/.frpc.pid
-/.frpc.log
+.frpc.pid
+.frpc.log
 
 # IDE
-/.idea/
-.DS_Store
-
-# 系统文件
+.idea/
 .DS_Store
 Thumbs.db
+
+# 依赖
+node_modules/
+
+# Go
+*.exe
+*.test
+*.out
+*.tsbuildinfo

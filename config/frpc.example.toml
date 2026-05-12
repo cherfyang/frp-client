@@ -1,0 +1,13 @@
+serverAddr = "127.0.0.1"
+serverPort = 7000
+loginFailExit = true
+
+[auth]
+token = "replace-with-your-token"
+
+[[proxies]]
+name = "example_ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 6000

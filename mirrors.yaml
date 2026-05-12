@@ -1,0 +1,16 @@
+mirrors:
+  - name: "GitHub 官方"
+    type: github
+    template: "https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
+  - name: "ghproxy.com"
+    type: proxy
+    template: "https://ghproxy.com/https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
+  - name: "gh.con.sh"
+    type: proxy
+    template: "https://gh.con.sh/https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
+  - name: "mirror.ghproxy.com"
+    type: proxy
+    template: "https://mirror.ghproxy.com/https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
+  - name: "自定义"
+    type: custom
+    template: ""
