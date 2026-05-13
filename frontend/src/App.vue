@@ -46,9 +46,14 @@ import {
   StopFrp,
   RestartFrp,
   GetFrpLogs,
+  StartDl,
+  GetDlProgress,
+  CancelDl,
+  ListDl,
+  RemoveCompletedDl,
 } from '../wailsjs/go/main/App';
 
-type ViewId = 'editor' | 'browse' | 'add' | 'help';
+type ViewId = 'editor' | 'browse' | 'add' | 'help' | 'download';
 type FrpStatusView = {
   running: boolean;
   pid: number;
@@ -69,6 +74,20 @@ type DownloadTargetView = {
   url: string;
   filename: string;
   version: string;
+};
+type DlTaskView = {
+  id: string;
+  url: string;
+  destPath: string;
+  state: string;
+  progress: {
+    downloaded: number;
+    total: number;
+    percentage: number;
+    speed: number;
+    done: boolean;
+    error: string;
+  };
 };
 type SettingsFileStatusView = {
   toolExists: boolean;
@@ -91,6 +110,7 @@ const moduleTabs: Array<{ id: ViewId; label: string }> = [
   { id: 'editor', label: '配置文件' },
   { id: 'browse', label: '查看段落' },
   { id: 'add', label: '添加段落' },
+  { id: 'download', label: '下载管理' },
   { id: 'help', label: '说明' },
 ];
 
@@ -133,6 +153,11 @@ const isCancelingDownload = ref(false);
 
 const showDownloadPanel = ref(false);
 const showLogs = ref(false);
+
+const dlUrl = ref('');
+const dlSavePath = ref('');
+const dlConnections = ref(4);
+const dlTasks = ref<DlTaskView[]>([]);
 
 const selectedSection = ref<SectionKey>('proxies');
 const selectedTemplateId = ref(defaultTemplateIdBySection.proxies);
@@ -617,6 +642,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (statusTimer) clearInterval(statusTimer);
   if (progressTimer) clearInterval(progressTimer);
+  if (dlTimer) clearInterval(dlTimer);
 });
 
 const handleStart = async () => {
@@ -659,6 +685,7 @@ const handleRestart = async () => {
         await startDownload();
         await refreshFrpStatus();
       }
+      restartButtonText.value = '重启frp服务';
       return;
     }
     const canRestart = await confirmAndKillExistingFrpc();
@@ -834,6 +861,73 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
   if (kind === 'boolean') return value === 'true';
   if (kind === 'array') return value.split(',').map(s => s.trim()).filter(Boolean);
   return value;
+};
+
+// ========== 下载面板 ==========
+
+let dlTimer: ReturnType<typeof setInterval> | null = null;
+
+const refreshDlTasks = async () => {
+  try {
+    dlTasks.value = await ListDl() as DlTaskView[];
+    const hasActive = dlTasks.value.some(t => t.state === 'downloading' || t.state === 'pending');
+    if (!hasActive && dlTimer) {
+      clearInterval(dlTimer);
+      dlTimer = null;
+    }
+  } catch { /* ignore */ }
+};
+
+const pickSavePath = async () => {
+  try {
+    const picked = await ChooseFile('选择保存路径');
+    if (picked) dlSavePath.value = picked;
+  } catch { /* ignore */ }
+};
+
+const startDl = async () => {
+  if (!dlUrl.value || !dlSavePath.value) return;
+  actionError.value = '';
+  actionSuccess.value = '';
+  try {
+    await StartDl(dlUrl.value, dlSavePath.value, dlConnections.value);
+    if (!dlTimer) {
+      await refreshDlTasks();
+      dlTimer = setInterval(refreshDlTasks, 500);
+    }
+    dlUrl.value = '';
+    dlSavePath.value = '';
+  } catch (e: any) {
+    actionError.value = e?.message || String(e);
+  }
+};
+
+const cancelDl = async (taskId: string) => {
+  try {
+    await CancelDl(taskId);
+  } catch { /* ignore */ }
+};
+
+const removeCompleted = async () => {
+  try {
+    await RemoveCompletedDl();
+    await refreshDlTasks();
+  } catch { /* ignore */ }
+};
+
+const formatBytes = (bytes: number): string => {
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+};
+
+const formatEta = (downloaded: number, total: number, speed: number): string => {
+  if (!speed || total <= 0 || downloaded >= total) return '--';
+  const eta = Math.ceil((total - downloaded) / speed);
+  if (eta < 60) return `${eta}秒`;
+  if (eta < 3600) return `${Math.floor(eta / 60)}分${eta % 60}秒`;
+  return `${Math.floor(eta / 3600)}时${Math.floor((eta % 3600) / 60)}分`;
 };
 </script>
 
@@ -1205,6 +1299,65 @@ const coerceExtraFieldValue = (kind: Exclude<FieldKind, 'select'>, value: string
             </ul>
             <pre v-else-if="block.type === 'code'"><code>{{ block.text }}</code></pre>
           </template>
+        </div>
+      </section>
+    </article>
+
+    <!-- ====== 下载面板 (Download) ====== -->
+    <article v-if="activeView === 'download'" class="body">
+      <section class="dl-panel">
+        <div class="dl-top">
+          <h2>下载管理</h2>
+          <div class="dl-top-btns">
+            <button class="btn btn-sm btn-ghost" @click="refreshDlTasks">刷新</button>
+            <button class="btn btn-sm btn-red" @click="removeCompleted">清除已完成</button>
+          </div>
+        </div>
+
+        <div class="dl-form">
+          <div class="dl-form-row">
+            <input v-model="dlUrl" class="input dl-url" type="text" placeholder="输入下载链接 https://..." @keyup.enter="startDl" />
+          </div>
+          <div class="dl-form-row">
+            <div class="path-row dl-path-row">
+              <input v-model="dlSavePath" class="input" type="text" placeholder="保存路径" @keyup.enter="startDl" />
+              <button class="btn btn-ghost" type="button" @click="pickSavePath">选择</button>
+            </div>
+            <div class="dl-opts">
+              <span class="dl-opt-label">连接数</span>
+              <input v-model.number="dlConnections" class="input input-xs dl-num" type="number" min="1" max="32" />
+            </div>
+            <button class="btn btn-blue" @click="startDl" :disabled="!dlUrl || !dlSavePath">开始下载</button>
+          </div>
+        </div>
+
+        <div v-if="!dlTasks.length" class="dl-empty">暂无下载任务，输入链接开始下载</div>
+
+        <div v-for="task in dlTasks" :key="task.id" class="dl-task">
+          <div class="dl-task-head">
+            <span class="dl-task-state" :class="'dl-state-' + task.state">{{ task.state }}</span>
+            <span class="dl-task-url" :title="task.url">{{ task.url }}</span>
+            <span class="dl-task-path" :title="task.destPath">{{ task.destPath.split('/').pop() || task.destPath.split('\\').pop() || task.destPath }}</span>
+            <button
+              v-if="task.state === 'downloading'"
+              class="btn btn-xs btn-red"
+              @click="cancelDl(task.id)"
+            >停止</button>
+          </div>
+          <div class="dl-task-bar">
+            <div
+              class="dl-task-fill"
+              :style="{ width: task.progress.percentage + '%' }"
+              :class="{ 'dl-done': task.state === 'done', 'dl-err': task.state === 'error' }"
+            ></div>
+          </div>
+          <div class="dl-task-info">
+            <span>{{ formatBytes(task.progress.downloaded) }} / {{ task.progress.total > 0 ? formatBytes(task.progress.total) : '未知大小' }}</span>
+            <span v-if="task.state === 'downloading' && task.progress.speed > 0">{{ formatBytes(task.progress.speed) }}/s</span>
+            <span v-if="task.state === 'downloading' && task.progress.speed > 0 && task.progress.total > 0">剩余 {{ formatEta(task.progress.downloaded, task.progress.total, task.progress.speed) }}</span>
+            <span v-if="task.state === 'done'">{{ task.progress.percentage.toFixed(1) }}%</span>
+            <span v-if="task.state === 'error'" class="dl-err-text">{{ task.progress.error }}</span>
+          </div>
         </div>
       </section>
     </article>
@@ -2373,5 +2526,160 @@ tbody tr:hover {
     width: 100%;
     max-width: none;
   }
+}
+
+/* ====== 下载面板 ====== */
+
+.dl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dl-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dl-top h2 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.dl-top-btns {
+  display: flex;
+  gap: 8px;
+}
+
+.dl-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.dl-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.dl-url {
+  flex: 1;
+}
+
+.dl-path-row {
+  flex: 1;
+}
+
+.dl-opts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dl-opt-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.dl-num {
+  width: 56px;
+  text-align: center;
+}
+
+.dl-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.dl-task {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.dl-task-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.dl-task-state {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.dl-state-pending { background: var(--surface-3); color: var(--muted); }
+.dl-state-downloading { background: rgba(47,129,247,0.15); color: var(--accent); }
+.dl-state-done { background: rgba(63,185,80,0.15); color: var(--ok); }
+.dl-state-error { background: rgba(248,81,73,0.15); color: var(--danger); }
+.dl-state-canceled { background: rgba(210,153,34,0.15); color: var(--warn); }
+
+.dl-task-url {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.dl-task-path {
+  color: var(--muted);
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.dl-task-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.dl-task-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s;
+  min-width: 0;
+}
+
+.dl-task-fill.dl-done { background: var(--ok); }
+.dl-task-fill.dl-err { background: var(--danger); }
+
+.dl-task-info {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.dl-err-text {
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
 }
 </style>

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,9 @@ type MirrorsConfig struct {
 type GithubRelease struct {
 	TagName string `json:"tag_name"`
 }
+
+const FixedReleaseVersion = "0.68.1"
+const fixedDownloadBaseURL = "http://8.162.14.1:8088/api/v1/alt-files/download"
 
 type DownloadProgress struct {
 	mu         sync.Mutex
@@ -231,6 +235,18 @@ func BuildFilename(version, osName, arch string) string {
 		ext = ".zip"
 	}
 	return fmt.Sprintf("frp_%s_%s_%s%s", versionNum, osName, arch, ext)
+}
+
+func BuildFixedFilename(osName, arch string) string {
+	ext := ".tar.gz"
+	if osName == "windows" {
+		ext = ".zip"
+	}
+	return fmt.Sprintf("frp_%s_%s_%s%s", FixedReleaseVersion, osName, arch, ext)
+}
+
+func BuildFixedDownloadURL(filename string) string {
+	return fixedDownloadBaseURL + "?path=" + url.QueryEscape(filename)
 }
 
 func DownloadFile(ctx context.Context, url, destPath string, progress *DownloadProgress) error {

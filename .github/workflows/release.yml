@@ -95,10 +95,31 @@ jobs:
       - name: List artifacts
         run: ls -R artifacts/
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/**/*.zip
-            artifacts/**/*.exe
-          generate_release_notes: true
+      - name: Create draft release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t ASSETS < <(find artifacts -type f \( -name '*.zip' -o -name '*.exe' \) | sort)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "No release assets found"
+            exit 1
+          fi
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "Release $TAG_NAME already exists and is published. Delete it or create a new tag before re-running."
+              exit 1
+            fi
+          else
+            gh release create "$TAG_NAME" \
+              --draft \
+              --title "$TAG_NAME" \
+              --generate-notes
+          fi
+
+          gh release upload "$TAG_NAME" "${ASSETS[@]}" --clobber
+          gh release edit "$TAG_NAME" --draft=false

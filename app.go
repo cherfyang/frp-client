@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"frp-client/pkg/autostart"
+	"frp-client/pkg/dl"
 	"frp-client/pkg/download"
 	"frp-client/pkg/frp"
 	"frp-client/pkg/system"
@@ -23,6 +24,7 @@ type App struct {
 	configPath   string
 	settingsPath string
 	settings     AppSettings
+	dl           *dl.Manager
 }
 
 type AppSettings struct {
@@ -86,6 +88,7 @@ func NewApp() *App {
 		configPath:   configPath,
 		settingsPath: settingsPath,
 		settings:     settings,
+		dl:           dl.NewManager(),
 	}
 }
 
@@ -297,20 +300,20 @@ func (a *App) CheckSettingsFiles() SettingsFileStatus {
 
 func toolHelp(toolPath string) string {
 	if runtime.GOOS == "windows" {
-		return fmt.Sprintf("Windows: 请手动下载 frp windows_amd64.zip，并把 frpc.exe 解压到工具路径: %s。设置里的工具路径必须和 frpc.exe 实际位置一致。", toolPath)
+		return fmt.Sprintf("Windows: 请把 frpc.exe 解压到 %s。", toolPath)
 	}
-	return fmt.Sprintf("macOS: 请手动下载 frp darwin 包，并把 frpc 解压到工具路径: %s。设置里的工具路径必须和 frpc 实际位置一致。", toolPath)
+	return fmt.Sprintf("macOS: 请把 frpc 解压到 %s。", toolPath)
 }
 
 func configHelp(configPath string) string {
-	return fmt.Sprintf("配置文件不存在时，请先创建 frpc.toml 或在编辑器中保存配置到: %s", configPath)
+	return fmt.Sprintf("配置文件路径: %s。", configPath)
 }
 
 func downloadHelp(toolDir string) string {
 	if runtime.GOOS == "windows" {
-		return fmt.Sprintf("Windows: 内置下载会把 frpc.exe 解压到 %s。若安全软件拦截，请手动下载并解压到同一目录。", toolDir)
+		return fmt.Sprintf("Windows: 下载后会把 frpc.exe 解压到 %s。", toolDir)
 	}
-	return fmt.Sprintf("macOS: 内置下载会把 frpc 解压到 %s。手动下载时也请解压到同一目录。", toolDir)
+	return fmt.Sprintf("macOS: 下载后会把 frpc 解压到 %s。", toolDir)
 }
 
 func manualKillHelp() string {
@@ -320,26 +323,19 @@ func manualKillHelp() string {
 	return "macOS: 如自动结束失败，请在终端执行 kill -9 <pid>。"
 }
 
-// ========== 系统信息 ==========
-
 func (a *App) GetSystemInfo() system.SystemInfo {
 	return system.GetSystemInfo()
 }
-
-// ========== 镜像源 ==========
 
 func (a *App) GetMirrors() ([]download.Mirror, error) {
 	mirrorPath := filepath.Join(filepath.Dir(a.configPath), "mirrors.yaml")
 	if _, err := os.Stat(mirrorPath); os.IsNotExist(err) {
 		return []download.Mirror{
 			{Name: "GitHub 官方", Type: "github", Template: "https://github.com/fatedier/frp/releases/download/{tag}/{filename}"},
-			{Name: "ghproxy.com", Type: "proxy", Template: "https://ghproxy.com/https://github.com/fatedier/frp/releases/download/{tag}/{filename}"},
 		}, nil
 	}
 	return download.LoadMirrors(mirrorPath)
 }
-
-// ========== frp 版本 ==========
 
 func (a *App) GetFrpVersions() ([]string, error) {
 	versions, err := download.FetchFrpVersions()
@@ -391,8 +387,6 @@ func (a *App) GetFrpHelp(version string, osName string, arch string) string {
 	return content
 }
 
-// ========== frpc 安装检测 ==========
-
 func (a *App) CheckFrpcInstalled() bool {
 	_, err := os.Stat(a.toolPath)
 	return err == nil
@@ -401,8 +395,6 @@ func (a *App) CheckFrpcInstalled() bool {
 func (a *App) GetFrpcVersion() string {
 	return download.ReadVersionFile(filepath.Dir(a.toolPath))
 }
-
-// ========== 下载 frpc ==========
 
 func (a *App) DownloadFrpc(version string, mirrorName string, osName string, arch string) error {
 	if osName == "" {
@@ -423,6 +415,7 @@ func (a *App) DownloadFrpc(version string, mirrorName string, osName string, arc
 		return fmt.Errorf("创建临时目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
+
 	ctx := download.StartDownloadContext()
 	defer download.FinishDownloadContext()
 
@@ -445,7 +438,7 @@ func (a *App) DownloadFrpc(version string, mirrorName string, osName string, arc
 	if err := download.ExtractFrpcToFile(archivePath, a.toolPath, osName); err != nil {
 		progress.SetError(err.Error())
 		if isWindowsSecurityBlockError(err) {
-			return fmt.Errorf("Windows 安全中心或杀毒软件拦截了 frpc 压缩包。请手动下载 %s，解压其中的 frpc.exe 到工具路径所在目录：%s。注意：设置里的工具路径必须和解压后的 frpc.exe 路径一致", filename, toolDir)
+			return fmt.Errorf("Windows 安全中心或杀毒软件拦截了 frpc 压缩包。请手动下载 %s，解压其中的 frpc.exe 到 %s。", filename, toolDir)
 		}
 		return fmt.Errorf("解压失败: %w", err)
 	}
@@ -474,8 +467,6 @@ func (a *App) GetDownloadProgress() float64 {
 	return progress.GetPercentage()
 }
 
-// ========== 配置管理 ==========
-
 func (a *App) ReadConfig() (string, error) {
 	content, err := frp.ReadConfig(a.configPath)
 	if err == nil {
@@ -494,8 +485,6 @@ func (a *App) WriteConfig(content string) error {
 func (a *App) ValidateConfig() (string, error) {
 	return frp.ValidateConfig(a.configPath, a.toolPath)
 }
-
-// ========== 进程管理 ==========
 
 func (a *App) GetFrpStatus() frp.FrpStatus {
 	return frp.GetStatus(a.configPath, a.toolPath)
@@ -523,4 +512,30 @@ func (a *App) RestartFrp() error {
 
 func (a *App) GetFrpLogs(lines int) string {
 	return frp.GetLogs(a.configPath, lines)
+}
+
+// ========== 通用下载器 ==========
+
+func (a *App) StartDl(url, destPath string, connections int) (string, error) {
+	return a.dl.Start(url, destPath, dl.TaskOptions{Connections: connections})
+}
+
+func (a *App) GetDlProgress(taskID string) (dl.ProgressInfo, error) {
+	info, ok := a.dl.GetProgress(taskID)
+	if !ok {
+		return dl.ProgressInfo{}, fmt.Errorf("task not found: %s", taskID)
+	}
+	return info, nil
+}
+
+func (a *App) CancelDl(taskID string) error {
+	return a.dl.Cancel(taskID)
+}
+
+func (a *App) ListDl() []dl.TaskInfo {
+	return a.dl.List()
+}
+
+func (a *App) RemoveCompletedDl() {
+	a.dl.RemoveCompleted()
 }
