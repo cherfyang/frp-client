@@ -30,6 +30,7 @@ import {
   SaveSettings,
   ResetSettings,
   ChooseFile,
+  ChooseDirectory,
   CheckSettingsFiles,
   GetDownloadTarget,
   GetFrpHelp,
@@ -53,7 +54,7 @@ import {
   RemoveCompletedDl,
 } from '../wailsjs/go/main/App';
 
-type ViewId = 'editor' | 'browse' | 'add' | 'help' | 'download';
+type ViewId = 'editor' | 'browse' | 'add' | 'help' | 'download' | 'status' | 'logs' | 'settings';
 type FrpStatusView = {
   running: boolean;
   pid: number;
@@ -111,7 +112,10 @@ const moduleTabs: Array<{ id: ViewId; label: string }> = [
   { id: 'browse', label: '查看段落' },
   { id: 'add', label: '添加段落' },
   { id: 'download', label: '下载管理' },
+  { id: 'status', label: '状态' },
+  { id: 'logs', label: '日志' },
   { id: 'help', label: '说明' },
+  { id: 'settings', label: '设置' },
 ];
 
 const sourceText = ref('');
@@ -124,7 +128,7 @@ const sourceEditor = ref<HTMLTextAreaElement | null>(null);
 const toolPath = ref('');
 const configPath = ref('');
 const theme = ref<'dark' | 'light'>('dark');
-const showSettings = ref(false);
+const systemInfo = ref<{ os: string; arch: string } | null>(null);
 const settingsDraft = reactive<AppSettingsView>({
   toolPath: '',
   configPath: '',
@@ -152,12 +156,24 @@ const isDownloading = ref(false);
 const isCancelingDownload = ref(false);
 
 const showDownloadPanel = ref(false);
-const showLogs = ref(false);
 
 const dlUrl = ref('');
-const dlSavePath = ref('');
+const dlDir = ref('');
+const dlFilename = ref('');
 const dlConnections = ref(4);
 const dlTasks = ref<DlTaskView[]>([]);
+const dlFilter = ref<'active' | 'done' | 'canceled' | 'error'>('active');
+
+const filteredDlTasks = computed(() =>
+  dlTasks.value.filter(t => {
+    switch (dlFilter.value) {
+      case 'active': return t.state === 'downloading' || t.state === 'pending';
+      case 'done': return t.state === 'done';
+      case 'canceled': return t.state === 'canceled';
+      case 'error': return t.state === 'error';
+    }
+  }),
+);
 
 const selectedSection = ref<SectionKey>('proxies');
 const selectedTemplateId = ref(defaultTemplateIdBySection.proxies);
@@ -189,10 +205,10 @@ const renderedLogLines = computed(() => {
   const text = frpLogs.value.trim();
   if (!text) return [];
   return text.split('\n').map((content, index) => ({
-    id: `${index}-${content}`,
+    id: index,
     content,
     level: detectLogLevel(content),
-  }));
+  })).reverse();
 });
 
 const detectLogLevel = (line: string): LogLineLevel => {
@@ -371,6 +387,7 @@ const refreshAll = async () => {
   await loadVersions();
   await refreshDownloadTarget();
   await loadHelp();
+  try { systemInfo.value = await GetSystemInfo() as any; } catch { /* ignore */ }
 };
 
 const loadSettings = async () => {
@@ -437,16 +454,7 @@ const loadHelp = async () => {
   }
 };
 
-const openSettings = () => {
-  settingsError.value = '';
-  settingsDraft.toolPath = toolPath.value;
-  settingsDraft.configPath = configPath.value;
-  settingsDraft.downloadUrl = settingsDraft.downloadUrl || 'https://github.com/fatedier/frp/releases/download/{tag}/{filename}';
-  settingsDraft.theme = theme.value;
-  settingsDraft.autoStart = Boolean(settingsDraft.autoStart);
-  refreshSettingsFileStatus();
-  showSettings.value = true;
-};
+
 
 const pickToolPath = async () => {
   try {
@@ -478,7 +486,7 @@ const saveAppSettings = async () => {
       autoStart: settingsDraft.autoStart,
     }) as AppSettingsView;
     applySettingsToState(next);
-    showSettings.value = false;
+    activeView.value = 'editor';
     actionSuccess.value = '设置已保存';
     await refreshSettingsFileStatus();
     await loadConfig();
@@ -647,7 +655,6 @@ onBeforeUnmount(() => {
 
 const handleStart = async () => {
   actionError.value = '';
-  showLogs.value = true;
   await refreshLogs();
   try {
     const canStart = await confirmAndKillExistingFrpc();
@@ -705,10 +712,7 @@ const handleRestart = async () => {
   }
 };
 
-const toggleLogs = () => {
-  showLogs.value = !showLogs.value;
-  if (showLogs.value) refreshLogs();
-};
+
 
 const jumpToSectionSource = async (section: ParsedSection) => {
   activeView.value = 'editor';
@@ -878,25 +882,49 @@ const refreshDlTasks = async () => {
   } catch { /* ignore */ }
 };
 
-const pickSavePath = async () => {
+const extractFilename = (urlStr: string): string => {
   try {
-    const picked = await ChooseFile('选择保存路径');
-    if (picked) dlSavePath.value = picked;
+    const u = new URL(urlStr);
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length > 0) {
+      const last = parts[parts.length - 1];
+      if (last && !last.endsWith('/')) return decodeURIComponent(last);
+    }
+    for (const key of ['path', 'file', 'filename']) {
+      const val = u.searchParams.get(key);
+      if (val) {
+        const segs = val.split('/').filter(Boolean);
+        if (segs.length > 0) return decodeURIComponent(segs[segs.length - 1]);
+      }
+    }
+  } catch {}
+  const qIdx = urlStr.indexOf('?');
+  const base = qIdx >= 0 ? urlStr.substring(0, qIdx) : urlStr;
+  const segments = base.split('/').filter(Boolean);
+  return segments.length > 0 ? segments[segments.length - 1] : 'download';
+};
+
+const pickDir = async () => {
+  try {
+    const picked = await ChooseDirectory('选择保存目录');
+    if (picked) dlDir.value = picked;
   } catch { /* ignore */ }
 };
 
 const startDl = async () => {
-  if (!dlUrl.value || !dlSavePath.value) return;
+  if (!dlUrl.value || !dlDir.value || !dlFilename.value) return;
   actionError.value = '';
   actionSuccess.value = '';
+  const destPath = dlDir.value.replace(/\/$/, '') + '/' + dlFilename.value;
   try {
-    await StartDl(dlUrl.value, dlSavePath.value, dlConnections.value);
+    await StartDl(dlUrl.value, destPath, dlConnections.value);
     if (!dlTimer) {
       await refreshDlTasks();
       dlTimer = setInterval(refreshDlTasks, 500);
     }
     dlUrl.value = '';
-    dlSavePath.value = '';
+    dlDir.value = '';
+    dlFilename.value = '';
   } catch (e: any) {
     actionError.value = e?.message || String(e);
   }
@@ -915,6 +943,13 @@ const removeCompleted = async () => {
   } catch { /* ignore */ }
 };
 
+const dlFilterCounts = computed(() => ({
+  active: dlTasks.value.filter(t => t.state === 'downloading' || t.state === 'pending').length,
+  done: dlTasks.value.filter(t => t.state === 'done').length,
+  canceled: dlTasks.value.filter(t => t.state === 'canceled').length,
+  error: dlTasks.value.filter(t => t.state === 'error').length,
+}));
+
 const formatBytes = (bytes: number): string => {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -929,11 +964,14 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
   if (eta < 3600) return `${Math.floor(eta / 60)}分${eta % 60}秒`;
   return `${Math.floor(eta / 3600)}时${Math.floor((eta % 3600) / 60)}分`;
 };
+
+watch(dlUrl, (url) => {
+  if (url) dlFilename.value = extractFilename(url);
+});
 </script>
 
 <template>
   <div class="app-container" :class="`theme-${theme}`">
-    <!-- 顶栏 -->
     <header class="app-header">
       <div class="header-left">
         <h1>FRP Client</h1>
@@ -948,8 +986,6 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
         <button v-if="frpcInstalled && !isRunning" class="btn btn-sm btn-green" @click="handleStart">启动</button>
         <button v-if="isRunning" class="btn btn-sm btn-red" @click="handleStop">停止</button>
         <button v-if="frpcInstalled" class="btn btn-sm btn-blue" :disabled="isRestarting" @click="handleRestart">{{ restartButtonText }}</button>
-        <button v-if="frpcInstalled" class="btn btn-sm btn-ghost" @click="toggleLogs">{{ showLogs ? '收起日志' : '日志' }}</button>
-        <button class="btn btn-sm btn-ghost" @click="openSettings">设置</button>
       </div>
     </header>
 
@@ -984,60 +1020,6 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
       </div>
       <div v-if="isDownloading" class="progress">
         <div class="progress-fill" :style="{ width: downloadProgress + '%' }"></div>
-      </div>
-    </section>
-
-    <!-- 日志面板 -->
-    <section v-if="showLogs" class="panel panel-log">
-      <div class="log-head">
-        <span class="log-title">frpc 日志</span>
-        <button class="btn btn-xs btn-ghost" @click="refreshLogs">刷新</button>
-      </div>
-      <div class="log-body">
-        <div v-if="!renderedLogLines.length" class="log-empty">(暂无日志)</div>
-        <div
-          v-for="line in renderedLogLines"
-          :key="line.id"
-          class="log-line"
-          :class="`log-line-${line.level}`"
-        >
-          {{ line.content }}
-        </div>
-      </div>
-    </section>
-
-    <!-- 消息 -->
-    <div v-if="actionError" class="msg msg-err">{{ actionError }}</div>
-    <div v-if="actionSuccess" class="msg msg-ok">{{ actionSuccess }}</div>
-    <div v-if="duplicateWarnings.length" class="msg msg-warn">
-      {{ duplicateWarnings.join('；') }}
-    </div>
-
-    <!-- 概览 -->
-    <section class="overview">
-      <div class="metric">
-        <span class="metric-label">服务器</span>
-        <strong>{{ serverSummary }}</strong>
-      </div>
-      <div class="metric">
-        <span class="metric-label">认证</span>
-        <strong>{{ authSummary }}</strong>
-      </div>
-      <div class="metric">
-        <span class="metric-label">代理</span>
-        <strong>{{ proxyCount }}</strong>
-      </div>
-      <div class="metric">
-        <span class="metric-label">访问器</span>
-        <strong>{{ visitorCount }}</strong>
-      </div>
-      <div class="metric metric-wide">
-        <span class="metric-label">配置路径</span>
-        <strong>{{ configPath || '读取中...' }}</strong>
-      </div>
-      <div class="metric metric-wide">
-        <span class="metric-label">工具路径</span>
-        <strong>{{ toolPath || '读取中...' }}</strong>
       </div>
     </section>
 
@@ -1320,36 +1302,42 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
           </div>
           <div class="dl-form-row">
             <div class="path-row dl-path-row">
-              <input v-model="dlSavePath" class="input" type="text" placeholder="保存路径" @keyup.enter="startDl" />
-              <button class="btn btn-ghost" type="button" @click="pickSavePath">选择</button>
+              <input v-model="dlDir" class="input" type="text" placeholder="保存目录" @keyup.enter="startDl" />
+              <button class="btn btn-ghost" type="button" @click="pickDir">选择</button>
             </div>
-            <div class="dl-opts">
-              <span class="dl-opt-label">连接数</span>
-              <input v-model.number="dlConnections" class="input input-xs dl-num" type="number" min="1" max="32" />
+          </div>
+          <div class="dl-form-row">
+            <div class="dl-fn-row">
+              <input v-model="dlFilename" class="input dl-fn" type="text" placeholder="文件名" @keyup.enter="startDl" />
+              <div class="dl-opts">
+                <span class="dl-opt-label">连接数</span>
+                <input v-model.number="dlConnections" class="input input-xs dl-num" type="number" min="1" max="32" />
+              </div>
             </div>
-            <button class="btn btn-blue" @click="startDl" :disabled="!dlUrl || !dlSavePath">开始下载</button>
+            <button class="btn btn-blue" @click="startDl" :disabled="!dlUrl || !dlDir || !dlFilename">开始下载</button>
           </div>
         </div>
 
-        <div v-if="!dlTasks.length" class="dl-empty">暂无下载任务，输入链接开始下载</div>
+        <div class="dl-filter-bar">
+          <button class="dl-filter-btn" :class="{ active: dlFilter === 'active' }" @click="dlFilter = 'active'">进行中 ({{ dlFilterCounts.active }})</button>
+          <button class="dl-filter-btn" :class="{ active: dlFilter === 'done' }" @click="dlFilter = 'done'">已完成 ({{ dlFilterCounts.done }})</button>
+          <button class="dl-filter-btn" :class="{ active: dlFilter === 'canceled' }" @click="dlFilter = 'canceled'">已取消 ({{ dlFilterCounts.canceled }})</button>
+          <button class="dl-filter-btn" :class="{ active: dlFilter === 'error' }" @click="dlFilter = 'error'">失败 ({{ dlFilterCounts.error }})</button>
+        </div>
 
-        <div v-for="task in dlTasks" :key="task.id" class="dl-task">
+        <div v-if="!filteredDlTasks.length" class="dl-empty">
+          {{ dlFilter === 'active' ? '暂无进行中的下载任务' : dlFilter === 'done' ? '暂无已完成的任务' : dlFilter === 'canceled' ? '暂无已取消的任务' : '暂无失败的任务' }}
+        </div>
+
+        <div v-for="task in filteredDlTasks" :key="task.id" class="dl-task">
           <div class="dl-task-head">
             <span class="dl-task-state" :class="'dl-state-' + task.state">{{ task.state }}</span>
             <span class="dl-task-url" :title="task.url">{{ task.url }}</span>
             <span class="dl-task-path" :title="task.destPath">{{ task.destPath.split('/').pop() || task.destPath.split('\\').pop() || task.destPath }}</span>
-            <button
-              v-if="task.state === 'downloading'"
-              class="btn btn-xs btn-red"
-              @click="cancelDl(task.id)"
-            >停止</button>
+            <button v-if="task.state === 'downloading'" class="btn btn-xs btn-red" @click="cancelDl(task.id)">停止</button>
           </div>
           <div class="dl-task-bar">
-            <div
-              class="dl-task-fill"
-              :style="{ width: task.progress.percentage + '%' }"
-              :class="{ 'dl-done': task.state === 'done', 'dl-err': task.state === 'error' }"
-            ></div>
+            <div class="dl-task-fill" :style="{ width: task.progress.percentage + '%' }" :class="{ 'dl-done': task.state === 'done', 'dl-err': task.state === 'error' }"></div>
           </div>
           <div class="dl-task-info">
             <span>{{ formatBytes(task.progress.downloaded) }} / {{ task.progress.total > 0 ? formatBytes(task.progress.total) : '未知大小' }}</span>
@@ -1362,16 +1350,52 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
       </section>
     </article>
 
-    <div v-if="showSettings" class="modal-backdrop" @click.self="showSettings = false">
-      <section class="settings-modal">
-        <div class="modal-head">
-          <div>
-            <h2>设置</h2>
-            <p>工具路径和配置路径会立即用于下载、验证、启动和自启动 frpc。</p>
-          </div>
-          <button class="btn btn-sm btn-ghost" @click="showSettings = false">关闭</button>
+    <!-- ====== 状态 (Status) ====== -->
+    <article v-if="activeView === 'status'" class="body">
+      <section class="st-panel">
+        <div class="st-top">
+          <h2>frpc 运行状态</h2>
+          <button class="btn btn-sm btn-ghost" @click="refreshFrpStatus">刷新</button>
         </div>
+        <div class="st-status-line">
+          <span class="status-dot" :class="{ on: isRunning }"></span>
+          <span class="st-status-label">{{ isRunning ? '运行中' : '已停止' }}</span>
+          <span v-if="isRunning && frpStatus.pid" class="st-pid">PID {{ frpStatus.pid }}</span>
+          <span v-if="isRunning && frpStatus.uptime" class="st-uptime">运行 {{ frpStatus.uptime }}</span>
+        </div>
+        <div v-if="frpcInstalled" class="st-grid">
+          <div class="st-item"><span class="st-key">frpc 版本</span><span class="st-val">{{ frpcVersion || '--' }}</span></div>
+          <div class="st-item"><span class="st-key">系统</span><span class="st-val">{{ systemInfo?.os || '--' }} {{ systemInfo?.arch || '' }}</span></div>
+          <div class="st-item st-item-wide"><span class="st-key">工具路径</span><span class="st-val">{{ toolPath || '--' }}</span></div>
+          <div class="st-item st-item-wide"><span class="st-key">配置路径</span><span class="st-val">{{ configPath || '--' }}</span></div>
+        </div>
+        <div class="st-grid">
+          <div class="st-item"><span class="st-key">服务器</span><span class="st-val">{{ serverSummary }}</span></div>
+          <div class="st-item"><span class="st-key">认证</span><span class="st-val">{{ authSummary }}</span></div>
+          <div class="st-item"><span class="st-key">代理数</span><span class="st-val">{{ proxyCount }}</span></div>
+          <div class="st-item"><span class="st-key">访问器数</span><span class="st-val">{{ visitorCount }}</span></div>
+        </div>
+      </section>
+    </article>
 
+    <!-- ====== 日志 (Logs) ====== -->
+    <article v-if="activeView === 'logs'" class="body-log">
+      <div class="log-head">
+        <span class="log-title">frpc 日志</span>
+        <button class="btn btn-xs btn-ghost" @click="refreshLogs">刷新</button>
+      </div>
+      <div class="log-body log-body-full">
+        <div v-if="!renderedLogLines.length" class="log-empty">(暂无日志)</div>
+        <div v-for="line in renderedLogLines" :key="line.id" class="log-line" :class="`log-line-${line.level}`">{{ line.content }}</div>
+      </div>
+    </article>
+
+    <!-- ====== 设置 (Settings) ====== -->
+    <article v-if="activeView === 'settings'" class="body">
+      <section class="st-panel">
+        <div class="st-top">
+          <h2>设置</h2>
+        </div>
         <div class="settings-stack">
           <label class="settings-field">
             <span>主题</span>
@@ -1380,42 +1404,27 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
               <button type="button" :class="{ active: settingsDraft.theme === 'light' }" @click="settingsDraft.theme = 'light'">白天</button>
             </div>
           </label>
-
           <label class="settings-field">
             <span>工具路径</span>
             <div class="path-row">
               <input v-model="settingsDraft.toolPath" class="input" type="text" placeholder="~/frp-client/frpc" />
               <button class="btn btn-ghost" type="button" @click="pickToolPath">选择</button>
             </div>
-            <small v-if="settingsFileStatus && !settingsFileStatus.toolExists" class="field-help warning-help">
-              {{ settingsFileStatus.toolHelp }}
-            </small>
+            <small v-if="settingsFileStatus && !settingsFileStatus.toolExists" class="field-help warning-help">{{ settingsFileStatus.toolHelp }}</small>
           </label>
-
           <label class="settings-field">
             <span>配置路径</span>
             <div class="path-row">
               <input v-model="settingsDraft.configPath" class="input" type="text" placeholder="~/frp-client/frpc.toml" />
               <button class="btn btn-ghost" type="button" @click="pickConfigPath">选择</button>
             </div>
-            <small v-if="settingsFileStatus && !settingsFileStatus.configExists" class="field-help warning-help">
-              {{ settingsFileStatus.configHelp }}
-            </small>
+            <small v-if="settingsFileStatus && !settingsFileStatus.configExists" class="field-help warning-help">{{ settingsFileStatus.configHelp }}</small>
           </label>
-
           <label class="settings-field">
             <span>下载链接</span>
-            <input
-              v-model="settingsDraft.downloadUrl"
-              class="input"
-              type="text"
-              placeholder="https://github.com/fatedier/frp/releases/download/{tag}/{filename}"
-            />
-            <small class="field-help">
-              支持 {tag}、{version}、{filename} 占位符；下载按钮会使用这里的链接，下载后仍解压到工具路径。
-            </small>
+            <input v-model="settingsDraft.downloadUrl" class="input" type="text" placeholder="https://github.com/fatedier/frp/releases/download/{tag}/{filename}" />
+            <small class="field-help">支持 {tag}、{version}、{filename} 占位符。</small>
           </label>
-
           <label class="settings-toggle">
             <input v-model="settingsDraft.autoStart" type="checkbox" />
             <span class="toggle-visual"></span>
@@ -1424,20 +1433,30 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
               <small>使用工具路径中的 frpc，并加载配置路径中的 frpc.toml。</small>
             </span>
           </label>
-
-          <div v-if="settingsFileStatus" class="settings-note">
-            {{ settingsFileStatus.downloadHelp }}
-          </div>
+          <div v-if="settingsFileStatus" class="settings-note">{{ settingsFileStatus.downloadHelp }}</div>
         </div>
-
         <div v-if="settingsError" class="msg msg-err msg-sm">{{ settingsError }}</div>
-
         <div class="form-actions">
           <button class="btn btn-red" type="button" @click="resetAppSettings">重置默认设置</button>
-          <button class="btn btn-ghost" type="button" @click="showSettings = false">取消</button>
           <button class="btn btn-blue" type="button" @click="saveAppSettings">保存设置</button>
         </div>
       </section>
+    </article>
+  </div>
+
+  <!-- 消息 -->
+  <div v-if="actionError || actionSuccess || duplicateWarnings.length" class="msg-bar">
+    <div v-if="actionError" class="msg msg-err">
+      <span>{{ actionError }}</span>
+      <button class="msg-close" @click="actionError = ''">✕</button>
+    </div>
+    <div v-if="actionSuccess" class="msg msg-ok">
+      <span>{{ actionSuccess }}</span>
+      <button class="msg-close" @click="actionSuccess = ''">✕</button>
+    </div>
+    <div v-if="duplicateWarnings.length" class="msg msg-warn">
+      <span>{{ duplicateWarnings.join('；') }}</span>
+      <button class="msg-close" @click="duplicateWarnings.splice(0)">✕</button>
     </div>
   </div>
 </template>
@@ -1690,9 +1709,12 @@ const formatEta = (downloaded: number, total: number, speed: number): string => 
 
 /* ---- messages ---- */
 .msg {
-  padding: 7px 24px;
+  padding: 7px 14px;
   font-size: 12px;
   flex-shrink: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 .msg-err {
   background: #490202;
@@ -1937,8 +1959,7 @@ tbody tr:hover {
 }
 
 .template-rail,
-.form-panel,
-.settings-modal {
+.form-panel {
   border: 1px solid var(--border-muted);
   border-radius: 8px;
   background: var(--surface);
@@ -2010,8 +2031,7 @@ tbody tr:hover {
   border-bottom: 1px solid var(--border-muted);
 }
 
-.form-panel-head h2,
-.modal-head h2 {
+.form-panel-head h2 {
   margin: 0;
   color: var(--text-strong);
   font-size: 20px;
@@ -2019,7 +2039,6 @@ tbody tr:hover {
 }
 
 .form-panel-head p,
-.modal-head p,
 .extra-head p {
   margin: 5px 0 0;
   color: var(--muted);
@@ -2325,32 +2344,6 @@ tbody tr:hover {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
-}
-
-/* ---- settings modal ---- */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.48);
-}
-
-.settings-modal {
-  width: min(640px, 100%);
-  padding: 20px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.25);
-}
-
-.modal-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--border-muted);
 }
 
 .settings-stack {
@@ -2682,4 +2675,32 @@ tbody tr:hover {
   white-space: nowrap;
   flex: 1;
 }
+
+.st-panel { display: flex; flex-direction: column; gap: 16px; }
+.st-top { display: flex; justify-content: space-between; align-items: center; }
+.st-top h2 { font-size: 16px; font-weight: 700; margin: 0; }
+.st-status-line { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border-muted); }
+.st-status-label { font-weight: 700; font-size: 15px; }
+.st-pid { color: var(--muted); font-size: 13px; }
+.st-uptime { color: var(--muted); font-size: 13px; margin-left: auto; }
+.st-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.st-item { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border-muted); }
+.st-item-wide { grid-column: 1 / -1; }
+.st-key { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.st-val { font-size: 13px; color: var(--text-strong); word-break: break-all; }
+
+.log-panel { display: flex; flex-direction: column; gap: 12px; }
+.dl-filter-bar { display: flex; gap: 4px; }
+.dl-filter-btn { padding: 4px 12px; border: 1px solid var(--border-muted); border-radius: 6px; background: var(--surface-2); color: var(--muted); font-size: 12px; cursor: pointer; transition: all 0.15s; }
+.dl-filter-btn:hover { border-color: var(--border); color: var(--text); }
+.dl-filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dl-fn-row { display: flex; gap: 8px; align-items: center; flex: 1; }
+.dl-fn { flex: 1; }
+
+.body-log { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; padding: 24px 24px 0; }
+.log-body-full { flex: 1; overflow-y: auto; margin: 0 -24px; padding: 0 24px; max-height: none; }
+
+.msg-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 100; display: flex; flex-direction: column; gap: 4px; padding: 8px; }
+.msg-close { background: transparent; border: none; color: inherit; opacity: 0.6; cursor: pointer; font-size: 14px; padding: 0 4px; line-height: 1; flex-shrink: 0; }
+.msg-close:hover { opacity: 1; }
 </style>

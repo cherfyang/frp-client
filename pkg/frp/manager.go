@@ -328,7 +328,7 @@ func GetStatus(configPath, toolPath string) FrpStatus {
 	}
 
 	if toolPath != "" {
-		cmd := exec.Command(toolPath, "--version")
+		cmd := exec.Command(toolPath, "-v")
 		output, _ := cmd.CombinedOutput()
 		status.Version = strings.TrimSpace(string(output))
 	}

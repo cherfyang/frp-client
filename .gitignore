@@ -11,6 +11,9 @@ frontend/package.json.md5
 config/frpc.toml
 config/profiles/
 
+# 开发文档
+dev-docs/
+
 # 运行时文件
 .frpc.pid
 .frpc.log

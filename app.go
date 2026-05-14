@@ -280,6 +280,12 @@ func (a *App) ChooseFile(title string) (string, error) {
 	})
 }
 
+func (a *App) ChooseDirectory(title string) (string, error) {
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: title,
+	})
+}
+
 func (a *App) CheckSettingsFiles() SettingsFileStatus {
 	status := SettingsFileStatus{
 		ToolPath:       a.toolPath,
